@@ -38,7 +38,7 @@ def _ensure_qdrant():
     except ImportError:
         raise ImportError(
             "qdrant-client is required for hybrid search. "
-            "Install with: pip install 'farmerp-wiki[hybrid]' "
+            "Install with: pip install 'wiki-agent[hybrid]' "
             "or: pip install qdrant-client"
         )
 
@@ -55,7 +55,7 @@ def _ensure_openai():
     except ImportError:
         raise ImportError(
             "openai is required for hybrid search embeddings. "
-            "Install with: pip install 'farmerp-wiki[hybrid]' "
+            "Install with: pip install 'wiki-agent[hybrid]' "
             "or: pip install openai"
         )
 

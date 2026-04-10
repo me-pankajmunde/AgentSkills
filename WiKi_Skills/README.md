@@ -108,7 +108,7 @@ python wiki.py lint --wiki-dir /path/to/my-wiki
 ## Hybrid Search Setup
 
 ```bash
-pip install 'farmerp-wiki[hybrid]'
+pip install 'wiki-agent[hybrid]'
 docker run -p 6333:6333 qdrant/qdrant
 export OPENAI_API_KEY=sk-...
 python bm25_retriever.py index --wiki-dir /path/to/wiki
