@@ -26,6 +26,7 @@ wiki-agent/
 ```
 
 **Zero external dependencies.** Pure Python 3. No NumPy, no NLTK, no rank_bm25.
+Optional: install [qmd](https://github.com/tobi/qmd) for hybrid BM25 + vector + LLM re-ranking search.
 
 ## Installation
 
@@ -63,6 +64,11 @@ python scripts/bm25_retriever.py retrieve "auth" --brief
 # 5c. Generate Marp slide deck from results
 python scripts/bm25_retriever.py retrieve "auth patterns" --format marp
 
+# 5d. Force a specific search backend
+python scripts/bm25_retriever.py retrieve "auth" --backend qmd       # hybrid search
+python scripts/bm25_retriever.py retrieve "auth" --backend bm25      # pure BM25
+python scripts/bm25_retriever.py retrieve "auth" --qmd-mode vsearch  # semantic only
+
 # 6. Boost recent/authoritative content
 python scripts/wiki.py graph --export   # export centrality data
 python scripts/bm25_retriever.py retrieve "auth" --freshness-weight 0.1 --centrality-weight 0.1
@@ -79,10 +85,10 @@ python scripts/bm25_retriever.py stats
 | `index` | Build/rebuild BM25 index from all wiki pages |
 | `search QUERY` | Ranked results (human-readable) |
 | `retrieve QUERY` | Full chunk context for LLM consumption (XML, JSON, or Marp) |
-| `ingest FILE\|URL` | Ingest file or URL, extract text, auto-rebuild index |
+| `ingest FILE\|URL` | Ingest file or URL, extract text, auto-rebuild index (+ qmd sync) |
 | `stats` | Index statistics, term distribution, chunk counts |
 
-**Key flags:** `--top-k N`, `--type entity|concept|source`, `--format xml|json|marp`, `--brief`, `--freshness-weight F`, `--centrality-weight F`, `--no-index`, `--chunk-size N`
+**Key flags:** `--top-k N`, `--type entity|concept|source`, `--format xml|json|marp`, `--brief`, `--freshness-weight F`, `--centrality-weight F`, `--no-index`, `--chunk-size N`, `--backend auto|bm25|qmd`, `--qmd-mode search|vsearch|query`
 
 ## The Pipeline
 
@@ -93,6 +99,22 @@ python scripts/bm25_retriever.py stats
 ## BM25 Scoring
 
 Okapi BM25 with `k1=1.5`, `b=0.75`. Hierarchical chunking (split on headers → paragraphs → sentences) with configurable overlap. Each chunk prefixed with `[Page Title] [Section Header]` for retrieval context.
+
+## Optional: Hybrid Search with qmd
+
+Install [qmd](https://github.com/tobi/qmd) (`npm install -g @tobilu/qmd`) for
+hybrid BM25 + vector + LLM re-ranking search. Once installed, all `search` and
+`retrieve` commands use it automatically (`--backend auto`).
+
+```bash
+# One-time setup
+npm install -g @tobilu/qmd
+cd .wiki && qmd collection add . --name wiki
+qmd context add qmd://wiki "Project wiki"
+qmd embed  # ~2GB models downloaded on first run
+```
+
+qmd is fully optional. Without it, pure-Python BM25 works everywhere.
 
 ## Wiki Structure
 

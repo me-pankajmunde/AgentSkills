@@ -159,9 +159,9 @@ python scripts/wiki.py lint
 | Command | Description |
 |---------|-------------|
 | `index [--chunk-size N] [--overlap N]` | Build/rebuild BM25 index from wiki pages |
-| `search QUERY [--top-k N] [--type TYPE]` | Search and display ranked results |
-| `retrieve QUERY [--top-k N] [--format xml\|json\|marp] [--brief]` | Retrieve context for LLM |
-| `ingest FILE\|URL [FILE\|URL...] [--no-index]` | Ingest files or URLs, auto-rebuild index |
+| `search QUERY [--top-k N] [--type TYPE] [--backend auto\|bm25\|qmd]` | Search and display ranked results |
+| `retrieve QUERY [--top-k N] [--format xml\|json\|marp] [--brief] [--backend auto\|bm25\|qmd]` | Retrieve context for LLM |
+| `ingest FILE\|URL [FILE\|URL...] [--no-index]` | Ingest files or URLs, auto-rebuild index (+ qmd sync) |
 | `stats` | Show index statistics, top terms, chunk distribution |
 
 **BM25 Parameters** (tunable in code):
@@ -293,6 +293,8 @@ to save it as a new page in `analyses/`. Then rebuild the index. This is how
 - `--freshness-weight F` — boost recently-updated pages (0.0-1.0)
 - `--centrality-weight F` — boost hub pages (requires `graph --export` first)
 - `--format marp` — output as Marp slide deck
+- `--backend auto|bm25|qmd` — search backend (`auto` uses qmd if installed)
+- `--qmd-mode search|vsearch|query` — qmd search mode (default: `query` = hybrid)
 
 ---
 
@@ -463,6 +465,51 @@ The SKILL.md tells the agent how to use the scripts. Just say:
 9. **Generate slide decks.** Use `retrieve --format marp` to create a Marp-compatible
    presentation from wiki knowledge. View with Obsidian's Marp plugin or any
    Marp renderer.
+
+10. **Upgrade to hybrid search with qmd.** Install [qmd](https://github.com/tobi/qmd)
+    (`npm install -g @tobilu/qmd`) for BM25 + vector + LLM re-ranking search.
+    Once installed, all `search` and `retrieve` commands automatically use it
+    (`--backend auto`). Force BM25 with `--backend bm25`. Use `--qmd-mode vsearch`
+    for pure semantic search, or `--qmd-mode query` (default) for full hybrid.
+
+---
+
+## qmd Integration (Optional)
+
+The retriever optionally delegates to [qmd](https://github.com/tobi/qmd) —
+a local hybrid search engine combining BM25 + vector embeddings + LLM re-ranking.
+
+**When to use:** When the wiki exceeds ~100 pages, or when keyword BM25 misses
+results where the user's query uses different words than the wiki content.
+
+**Setup:**
+```bash
+# 1. Install qmd (requires Node.js >= 22)
+npm install -g @tobilu/qmd
+
+# 2. Create a collection for the wiki
+cd .wiki && qmd collection add . --name wiki
+
+# 3. Add context to improve search quality
+qmd context add qmd://wiki "Project wiki — entities, concepts, sources, analyses"
+
+# 4. Generate vector embeddings (~2GB of models downloaded on first run)
+qmd embed
+```
+
+**How it works:**
+- `--backend auto` (default): uses qmd if installed, falls back to BM25
+- `--backend bm25`: forces pure-Python BM25 (zero dependencies)
+- `--backend qmd`: forces qmd (errors if not installed)
+- `--qmd-mode query`: hybrid BM25 + vector + re-ranking (best quality, default)
+- `--qmd-mode search`: BM25 only via qmd
+- `--qmd-mode vsearch`: vector semantic search only
+
+**Auto-sync:** After every `ingest`, if qmd is installed, the retriever
+automatically runs `qmd update && qmd embed` to keep the hybrid index current.
+
+**Zero-dependency contract preserved:** qmd is entirely optional. If not
+installed, everything works exactly as before with pure-Python BM25.
 
 ---
 

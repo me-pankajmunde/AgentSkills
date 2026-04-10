@@ -26,10 +26,97 @@ import re
 import json
 import math
 import hashlib
+import shutil
+import subprocess
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict, Counter
 from typing import List, Dict, Tuple, Optional, Any
+
+
+# ============================================================================
+# QMD INTEGRATION — Optional hybrid search backend (BM25 + vector + re-ranking)
+# ============================================================================
+
+def _qmd_available() -> bool:
+    """Check if qmd CLI is installed and accessible."""
+    return shutil.which('qmd') is not None
+
+
+def _qmd_search(query: str, wiki_dir: Path, top_k: int = 10,
+                mode: str = 'query', output_format: str = 'json') -> Optional[List[Dict]]:
+    """
+    Run a search via qmd CLI. Returns parsed results or None on failure.
+
+    mode: 'search' (BM25 only), 'vsearch' (vector only), 'query' (hybrid + re-ranking)
+    """
+    cmd = ['qmd', mode, query, '--json', '-n', str(top_k)]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60,
+            cwd=str(wiki_dir),
+        )
+        if result.returncode != 0:
+            print(f"  qmd {mode} failed: {result.stderr.strip()}", file=sys.stderr)
+            return None
+        data = json.loads(result.stdout)
+        # Normalize qmd output to match our result format
+        results = []
+        items = data if isinstance(data, list) else data.get('results', [])
+        for item in items:
+            results.append({
+                'chunk_id': item.get('docid', ''),
+                'score': round(item.get('score', 0.0), 4),
+                'filepath': item.get('path', item.get('displayPath', '')),
+                'title': item.get('title', ''),
+                'section': item.get('snippet', '')[:80],
+                'page_type': 'unknown',
+                'tags': [],
+                'content': item.get('snippet', item.get('body', '')),
+                'content_raw': item.get('body', item.get('snippet', '')),
+                'position': 0,
+                '_qmd': True,  # marker for qmd-sourced results
+            })
+        return results
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+        print(f"  qmd error: {e}", file=sys.stderr)
+        return None
+
+
+def _qmd_update(wiki_dir: Path) -> bool:
+    """Re-index qmd collections and update embeddings. Returns True on success."""
+    try:
+        result = subprocess.run(
+            ['qmd', 'update'], capture_output=True, text=True,
+            timeout=120, cwd=str(wiki_dir),
+        )
+        if result.returncode != 0:
+            print(f"  qmd update failed: {result.stderr.strip()}", file=sys.stderr)
+            return False
+        # Embeddings update (may take longer on first run)
+        result = subprocess.run(
+            ['qmd', 'embed'], capture_output=True, text=True,
+            timeout=300, cwd=str(wiki_dir),
+        )
+        if result.returncode != 0:
+            print(f"  qmd embed failed: {result.stderr.strip()}", file=sys.stderr)
+            return False
+        return True
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"  qmd sync error: {e}", file=sys.stderr)
+        return False
+
+
+def _resolve_backend(requested: str) -> str:
+    """Resolve 'auto' backend to 'qmd' or 'bm25' based on availability."""
+    if requested == 'qmd':
+        if not _qmd_available():
+            print("  ⚠️  qmd not found, falling back to bm25", file=sys.stderr)
+            return 'bm25'
+        return 'qmd'
+    if requested == 'auto':
+        return 'qmd' if _qmd_available() else 'bm25'
+    return 'bm25'
 
 
 # ============================================================================
@@ -815,6 +902,7 @@ def cmd_search(args):
     top_k = 10
     type_filter = None
     tag_filter = None
+    backend = 'auto'
     query_parts = []
     
     i = 0
@@ -827,17 +915,38 @@ def cmd_search(args):
             type_filter = args[i + 1]; i += 2
         elif args[i] == '--tag' and i + 1 < len(args):
             tag_filter = args[i + 1]; i += 2
+        elif args[i] == '--backend' and i + 1 < len(args):
+            backend = args[i + 1]; i += 2
         else:
             query_parts.append(args[i]); i += 1
     
     if not query_parts:
-        print("Usage: bm25_retriever.py search 'query' [--top-k N]", file=sys.stderr)
+        print("Usage: bm25_retriever.py search 'query' [--top-k N] [--backend auto|bm25|qmd]", file=sys.stderr)
         sys.exit(1)
     
     query = ' '.join(query_parts)
     wd = find_wiki_dir(wiki_dir)
+    backend = _resolve_backend(backend)
     
-    # Load index
+    # qmd backend
+    if backend == 'qmd':
+        results = _qmd_search(query, wd, top_k=top_k, mode='search')
+        if results is None:
+            print("  Falling back to BM25...", file=sys.stderr)
+        else:
+            if not results:
+                print(f"No results for: {query}")
+                return
+            print(f"🔍 qmd Results for: \"{query}\" ({len(results)} hits)\n")
+            for i_r, r in enumerate(results):
+                print(f"  {i_r+1}. [{r['score']:.2f}] {r['title']}")
+                print(f"     {r['filepath']}")
+                preview = r['content'][:150].replace('\n', ' ').strip()
+                print(f"     \"{preview}...\"")
+                print()
+            return
+    
+    # BM25 fallback
     index_path = wd / '_bm25_index.json'
     if not index_path.exists():
         print("Index not found. Building now...", file=sys.stderr)
@@ -877,6 +986,8 @@ def cmd_retrieve(args):
     brief = False
     freshness_weight = 0.0
     centrality_weight = 0.0
+    backend = 'auto'
+    qmd_mode = 'query'  # search, vsearch, or query (hybrid)
     query_parts = []
     
     i = 0
@@ -897,43 +1008,58 @@ def cmd_retrieve(args):
             freshness_weight = float(args[i + 1]); i += 2
         elif args[i] == '--centrality-weight' and i + 1 < len(args):
             centrality_weight = float(args[i + 1]); i += 2
+        elif args[i] == '--backend' and i + 1 < len(args):
+            backend = args[i + 1]; i += 2
+        elif args[i] == '--qmd-mode' and i + 1 < len(args):
+            qmd_mode = args[i + 1]; i += 2
         else:
             query_parts.append(args[i]); i += 1
     
     if not query_parts:
-        print("Usage: bm25_retriever.py retrieve 'query' [--top-k N] [--format xml|json|marp] [--brief]",
+        print("Usage: bm25_retriever.py retrieve 'query' [--top-k N] [--format xml|json|marp] [--brief] [--backend auto|bm25|qmd]",
               file=sys.stderr)
         sys.exit(1)
     
     query = ' '.join(query_parts)
     wd = find_wiki_dir(wiki_dir)
+    backend = _resolve_backend(backend)
     
-    # Load or build index
-    index_path = wd / '_bm25_index.json'
-    if not index_path.exists():
-        idx = index_wiki(str(wd))
-        idx.save(str(index_path))
-    else:
-        idx = BM25Index()
-        idx.load(str(index_path))
+    # qmd backend — hybrid search with vector + BM25 + re-ranking
+    results = None
+    if backend == 'qmd':
+        qmd_results = _qmd_search(query, wd, top_k=top_k, mode=qmd_mode)
+        if qmd_results is not None:
+            results = qmd_results
+        else:
+            print("  Falling back to BM25...", file=sys.stderr)
     
-    # Load centrality data if boosting requested
-    centrality_data = None
-    if centrality_weight > 0:
-        centrality_path = wd / '_centrality.json'
-        if centrality_path.exists():
-            centrality_data = json.loads(centrality_path.read_text(encoding='utf-8'))
-    
-    results = idx.search(query, top_k=top_k, page_type_filter=type_filter,
-                         freshness_weight=freshness_weight,
-                         centrality_data=centrality_data,
-                         centrality_weight=centrality_weight)
+    # BM25 fallback
+    if results is None:
+        index_path = wd / '_bm25_index.json'
+        if not index_path.exists():
+            idx = index_wiki(str(wd))
+            idx.save(str(index_path))
+        else:
+            idx = BM25Index()
+            idx.load(str(index_path))
+        
+        # Load centrality data if boosting requested
+        centrality_data = None
+        if centrality_weight > 0:
+            centrality_path = wd / '_centrality.json'
+            if centrality_path.exists():
+                centrality_data = json.loads(centrality_path.read_text(encoding='utf-8'))
+        
+        results = idx.search(query, top_k=top_k, page_type_filter=type_filter,
+                             freshness_weight=freshness_weight,
+                             centrality_data=centrality_data,
+                             centrality_weight=centrality_weight)
     
     if output_format == 'json':
         print(json.dumps({
             'query': query,
+            'backend': backend,
             'results': results,
-            'total_chunks_in_index': idx.N,
         }, indent=2, ensure_ascii=False))
     elif output_format == 'marp':
         print(build_marp_context(results, query))
@@ -1044,7 +1170,6 @@ def cmd_ingest_file(args):
             continue
         
         # Copy to raw/
-        import shutil
         dest = raw_dir / p.name
         counter = 1
         while dest.exists():
@@ -1086,6 +1211,14 @@ def cmd_ingest_file(args):
             print(f"   Index rebuilt: {idx.N} chunks, {len(idx.df)} terms")
         except Exception as e:
             print(f"   ⚠️  Index rebuild failed: {e}", file=sys.stderr)
+        
+        # Sync qmd if available (keeps hybrid search index in sync)
+        if _qmd_available():
+            print("🔄 Syncing qmd index...")
+            if _qmd_update(wd):
+                print("   qmd index synced")
+            else:
+                print("   ⚠️  qmd sync failed (BM25 index is still up to date)", file=sys.stderr)
 
 
 def _ingest_url(url: str, raw_dir: Path, wiki_dir: Path) -> Dict:
@@ -1154,9 +1287,11 @@ wiki-agent BM25 Retriever
 
 Usage:
     bm25_retriever.py index     [--wiki-dir PATH] [--chunk-size N] [--overlap N]
-    bm25_retriever.py search    QUERY [--top-k N] [--type TYPE] [--tag TAG] [--wiki-dir PATH]
+    bm25_retriever.py search    QUERY [--top-k N] [--type TYPE] [--tag TAG]
+                                      [--backend auto|bm25|qmd] [--wiki-dir PATH]
     bm25_retriever.py retrieve  QUERY [--top-k N] [--format xml|json|marp] [--brief]
                                       [--freshness-weight F] [--centrality-weight F]
+                                      [--backend auto|bm25|qmd] [--qmd-mode search|vsearch|query]
                                       [--max-tokens N] [--wiki-dir PATH]
     bm25_retriever.py ingest    FILE|URL [FILE|URL...] [--wiki-dir PATH] [--no-index]
     bm25_retriever.py stats     [--wiki-dir PATH]
@@ -1167,6 +1302,14 @@ Commands:
     retrieve   Search and output full context for RAG pipeline (XML, JSON, or Marp)
     ingest     Copy raw files or fetch URLs into wiki, extract text, auto-rebuild index
     stats      Show index statistics and top terms
+
+Search backend:
+    --backend auto        Use qmd if installed, otherwise BM25 (default)
+    --backend bm25        Force pure-Python BM25 search
+    --backend qmd         Force qmd hybrid search (requires: npm install -g @tobilu/qmd)
+    --qmd-mode query      Hybrid: BM25 + vector + re-ranking (default, best quality)
+    --qmd-mode search     BM25 only via qmd (fast)
+    --qmd-mode vsearch    Vector semantic search only
 
 Retrieval flags:
     --brief               Return title + section + first 2 sentences per chunk (~300 tokens)
