@@ -1,5 +1,5 @@
 [project]
-name = "farmerp-wiki"
+name = "wiki-agent"
 version = "0.2.0"
 description = "LLM Wiki Agent with hybrid BM25 + Qdrant retrieval, RRF fusion, and LLM reranking"
 readme = "README.md"

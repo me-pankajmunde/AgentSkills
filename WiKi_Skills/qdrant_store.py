@@ -6,7 +6,7 @@ Wraps qdrant-client + OpenAI embeddings to provide semantic search
 over wiki chunks. Used alongside BM25 for hybrid retrieval via RRF fusion.
 
 Requires optional dependencies:
-    pip install "farmerp-wiki[hybrid]"
+    pip install "wiki-agent[hybrid]"
     # or: pip install qdrant-client openai
 
 If dependencies are missing, all functions raise ImportError with a clear message.

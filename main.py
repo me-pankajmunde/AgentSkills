@@ -1,5 +1,5 @@
 def main():
-    print("Hello from farmerp-wiki!")
+    print("Hello from wiki-agent!")
 
 
 if __name__ == "__main__":

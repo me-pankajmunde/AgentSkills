@@ -61,7 +61,7 @@ def _resolve_backend(requested: str, wiki_dir: Optional[Path] = None) -> str:
     if requested == 'hybrid':
         if not _hybrid_configured(wiki_dir):
             print("  ⚠️  Hybrid search not configured, falling back to bm25", file=sys.stderr)
-            print("     Install: pip install 'farmerp-wiki[hybrid]'", file=sys.stderr)
+            print("     Install: pip install 'wiki-agent[hybrid]'", file=sys.stderr)
             print("     Configure: OPENAI_API_KEY + Qdrant at localhost:6333", file=sys.stderr)
             return 'bm25'
         return 'hybrid'
@@ -1712,7 +1712,7 @@ Search backend:
     --bm25-only           Index command: skip Qdrant, only build BM25 index
 
 Hybrid search setup:
-    1. pip install 'farmerp-wiki[hybrid]'   (installs qdrant-client + openai)
+    1. pip install 'wiki-agent[hybrid]'   (installs qdrant-client + openai)
     2. docker run -p 6333:6333 qdrant/qdrant
     3. export OPENAI_API_KEY=sk-...
     4. python bm25_retriever.py index       (builds BM25 + Qdrant indexes)

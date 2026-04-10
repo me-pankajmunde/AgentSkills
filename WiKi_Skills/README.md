@@ -27,13 +27,13 @@ WiKi_Skills/
 ```
 
 **Zero external dependencies for BM25-only mode.** Pure Python 3. No NumPy, no NLTK.
-Optional: install `farmerp-wiki[hybrid]` for Qdrant semantic search + RRF + LLM reranking.
+Optional: install `wiki-agent[hybrid]` for Qdrant semantic search + RRF + LLM reranking.
 
 ## Installation
 
 ```bash
-pip install farmerp-wiki                    # BM25-only (zero deps)
-pip install 'farmerp-wiki[hybrid]'          # + Qdrant + OpenAI
+pip install wiki-agent                    # BM25-only (zero deps)
+pip install 'wiki-agent[hybrid]'          # + Qdrant + OpenAI
 ```
 
 ### For LLM Agent Integration

@@ -358,7 +358,7 @@ Query → BM25 (top 50) + Qdrant semantic (top 50)
 
 **Setup:**
 ```bash
-pip install 'farmerp-wiki[hybrid]'           # Install qdrant-client + openai
+pip install 'wiki-agent[hybrid]'           # Install qdrant-client + openai
 docker run -p 6333:6333 qdrant/qdrant        # Start Qdrant
 export OPENAI_API_KEY=sk-...                 # For embeddings + reranking + compilation
 python bm25_retriever.py index --wiki-dir /path/to/wiki
