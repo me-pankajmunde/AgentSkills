@@ -1,11 +1,14 @@
 ---
 name: wiki-agent
 description: >
-  An LLM-powered Wiki Agent with built-in BM25 RAG pipeline that incrementally builds
-  and maintains a persistent, interlinked knowledge base for any project. When a user
-  adds a document, it gets ingested into a structured wiki and indexed for BM25 retrieval.
-  Queries are answered by retrieving relevant chunks from the compiled wiki — not by
-  re-reading raw sources each time. Use this skill whenever the user says things like
+  An LLM-powered Wiki Agent with hybrid retrieval (BM25 + Qdrant semantic search +
+  Reciprocal Rank Fusion + LLM reranking) that incrementally builds and maintains a
+  persistent, interlinked knowledge base for any project. When a user adds a document,
+  it gets ingested into a structured wiki and indexed for both keyword and semantic
+  retrieval. Queries are answered by fusing BM25 lexical matches with Qdrant vector
+  similarity via RRF, then reranking the top results using an LLM — not by re-reading
+  raw sources each time. Falls back to pure BM25 (zero dependencies) when hybrid search
+  is not configured. Use this skill whenever the user says things like
   "build a wiki", "create a knowledge base", "ingest this document", "add this to the wiki",
   "update the wiki", "lint the wiki", "query the wiki", "what does the wiki say about X",
   "search wiki for Y", "process this file", "wiki status", "initialize wiki", "setup wiki",
@@ -13,12 +16,12 @@ description: >
   a structured, persistent knowledge base from project files. Also trigger when the user
   drops source files (articles, papers, transcripts, notes, code docs, PDFs, markdown)
   and expects them to be synthesized into an evolving knowledge base — not just summarized
-  once. This skill turns any project directory into a living wiki with BM25 retrieval that
+  once. This skill turns any project directory into a living wiki with hybrid retrieval that
   compounds knowledge over time. Even if the user just says "process this", "what do we
   know about X", "organize my docs", or "find info about Y in my project", consider this skill.
 ---
 
-# Wiki Agent — RAG Pipeline with BM25 Retrieval
+# Wiki Agent — Hybrid RAG Pipeline (BM25 + Qdrant + RRF + LLM Reranking)
 
 A portable, project-agnostic LLM Wiki Agent inspired by
 [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
@@ -158,10 +161,10 @@ python scripts/wiki.py lint
 
 | Command | Description |
 |---------|-------------|
-| `index [--chunk-size N] [--overlap N]` | Build/rebuild BM25 index from wiki pages |
-| `search QUERY [--top-k N] [--type TYPE] [--backend auto\|bm25\|qmd]` | Search and display ranked results |
-| `retrieve QUERY [--top-k N] [--format xml\|json\|marp] [--brief] [--backend auto\|bm25\|qmd]` | Retrieve context for LLM |
-| `ingest FILE\|URL [FILE\|URL...] [--no-index]` | Ingest files or URLs, auto-rebuild index (+ qmd sync) |
+| `index [--chunk-size N] [--overlap N] [--bm25-only]` | Build/rebuild BM25 index (+ Qdrant if hybrid configured) |
+| `search QUERY [--top-k N] [--type TYPE] [--backend auto\|bm25\|hybrid\|qdrant] [--no-rerank]` | Search and display ranked results |
+| `retrieve QUERY [--top-k N] [--format xml\|json\|marp] [--brief] [--backend auto\|bm25\|hybrid\|qdrant] [--no-rerank]` | Retrieve context for LLM |
+| `ingest FILE\|URL [FILE\|URL...] [--no-index]` | Ingest files or URLs, auto-rebuild index (+ Qdrant sync) |
 | `stats` | Show index statistics, top terms, chunk distribution |
 
 **BM25 Parameters** (tunable in code):
@@ -293,8 +296,28 @@ to save it as a new page in `analyses/`. Then rebuild the index. This is how
 - `--freshness-weight F` — boost recently-updated pages (0.0-1.0)
 - `--centrality-weight F` — boost hub pages (requires `graph --export` first)
 - `--format marp` — output as Marp slide deck
-- `--backend auto|bm25|qmd` — search backend (`auto` uses qmd if installed)
-- `--qmd-mode search|vsearch|query` — qmd search mode (default: `query` = hybrid)
+- `--backend auto|bm25|hybrid|qdrant` — search backend (`auto` uses hybrid if configured)
+- `--no-rerank` — skip LLM reranking, use RRF fusion scores directly
+
+#### Hybrid Search (Qdrant + RRF + LLM Reranking)
+
+When hybrid search is configured, the retrieval pipeline is:
+
+```
+Query → BM25 (top 50) + Qdrant semantic (top 50)
+      → Reciprocal Rank Fusion (merges both lists)
+      → LLM Reranking (scores top 20 for relevance)
+      → Final top-K results
+```
+
+**Setup:**
+```bash
+pip install 'farmerp-wiki[hybrid]'           # Install qdrant-client + openai
+docker run -p 6333:6333 qdrant/qdrant        # Start Qdrant
+export OPENAI_API_KEY=sk-...                 # For embeddings + reranking
+python scripts/bm25_retriever.py index       # Build BM25 + Qdrant indexes
+python scripts/bm25_retriever.py search "auth" --backend hybrid
+```
 
 ---
 

@@ -1,7 +1,13 @@
 [project]
 name = "farmerp-wiki"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "LLM Wiki Agent with hybrid BM25 + Qdrant retrieval, RRF fusion, and LLM reranking"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []
+
+[project.optional-dependencies]
+hybrid = [
+    "qdrant-client>=1.9.0",
+    "openai>=1.0.0",
+]

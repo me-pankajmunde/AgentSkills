@@ -1,6 +1,6 @@
-# Wiki Agent — RAG Pipeline with BM25 Retrieval
+# Wiki Agent — Hybrid RAG Pipeline (BM25 + Qdrant + RRF + LLM Reranking)
 
-A portable LLM Wiki Agent with built-in BM25 search, inspired by [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Drop it into any project — it builds a persistent, interlinked knowledge base that compounds over time, with BM25 retrieval for answering queries.
+A portable LLM Wiki Agent with hybrid retrieval, inspired by [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Drop it into any project — it builds a persistent, interlinked knowledge base that compounds over time, with BM25 + Qdrant semantic search fused via Reciprocal Rank Fusion and LLM reranking.
 
 ## How It Differs from Standard RAG
 
@@ -25,8 +25,8 @@ wiki-agent/
     └── page-templates.md             # Templates for source/entity/concept/analysis pages
 ```
 
-**Zero external dependencies.** Pure Python 3. No NumPy, no NLTK, no rank_bm25.
-Optional: install [qmd](https://github.com/tobi/qmd) for hybrid BM25 + vector + LLM re-ranking search.
+**Zero external dependencies for BM25-only mode.** Pure Python 3. No NumPy, no NLTK, no rank_bm25.
+Optional: install `farmerp-wiki[hybrid]` for Qdrant semantic search + RRF fusion + LLM reranking.
 
 ## Installation
 
@@ -65,9 +65,10 @@ python scripts/bm25_retriever.py retrieve "auth" --brief
 python scripts/bm25_retriever.py retrieve "auth patterns" --format marp
 
 # 5d. Force a specific search backend
-python scripts/bm25_retriever.py retrieve "auth" --backend qmd       # hybrid search
-python scripts/bm25_retriever.py retrieve "auth" --backend bm25      # pure BM25
-python scripts/bm25_retriever.py retrieve "auth" --qmd-mode vsearch  # semantic only
+python scripts/bm25_retriever.py retrieve "auth" --backend hybrid     # BM25 + Qdrant + RRF + rerank
+python scripts/bm25_retriever.py retrieve "auth" --backend bm25       # pure BM25
+python scripts/bm25_retriever.py retrieve "auth" --backend qdrant     # semantic only
+python scripts/bm25_retriever.py retrieve "auth" --backend hybrid --no-rerank  # RRF without LLM rerank
 
 # 6. Boost recent/authoritative content
 python scripts/wiki.py graph --export   # export centrality data
@@ -88,33 +89,55 @@ python scripts/bm25_retriever.py stats
 | `ingest FILE\|URL` | Ingest file or URL, extract text, auto-copy images to `raw/assets/`, auto-rebuild index |
 | `stats` | Index statistics, term distribution, chunk counts |
 
-**Key flags:** `--top-k N`, `--type entity|concept|source`, `--format xml|json|marp`, `--brief`, `--freshness-weight F`, `--centrality-weight F`, `--no-index`, `--chunk-size N`, `--backend auto|bm25|qmd`, `--qmd-mode search|vsearch|query`
+**Key flags:** `--top-k N`, `--type entity|concept|source`, `--format xml|json|marp`, `--brief`, `--freshness-weight F`, `--centrality-weight F`, `--no-index`, `--chunk-size N`, `--backend auto|bm25|hybrid|qdrant`, `--no-rerank`, `--bm25-only`
 
 ## The Pipeline
 
 1. **Ingest** — Document arrives → copied to `raw/` → images auto-extracted to `raw/assets/` → LLM creates source summary + entity pages + concept pages → cross-references built → BM25 index auto-rebuilt
-2. **Query** — User asks question → BM25 retrieves top-k chunks (with optional freshness/centrality boosting) → LLM synthesizes answer with citations → valuable answers filed back as analysis pages
+2. **Query** — User asks question → BM25 + Qdrant retrieve top-k chunks → RRF fuses ranked lists → LLM reranks top candidates → synthesizes answer with citations → valuable answers filed back as analysis pages
 3. **Lint** — Health check for orphan pages, broken links, asymmetric cross-references, stale content, missing frontmatter fields
 
 ## BM25 Scoring
 
 Okapi BM25 with `k1=1.5`, `b=0.75`. Hierarchical chunking (split on headers → paragraphs → sentences) with configurable overlap. Each chunk prefixed with `[Page Title] [Section Header]` for retrieval context.
 
-## Optional: Hybrid Search with qmd
+## Optional: Hybrid Search with Qdrant + RRF + LLM Reranking
 
-Install [qmd](https://github.com/tobi/qmd) (`npm install -g @tobilu/qmd`) for
-hybrid BM25 + vector + LLM re-ranking search. Once installed, all `search` and
-`retrieve` commands use it automatically (`--backend auto`).
+Install optional dependencies and start Qdrant for hybrid retrieval:
 
 ```bash
-# One-time setup
-npm install -g @tobilu/qmd
-cd .wiki && qmd collection add . --name wiki
-qmd context add qmd://wiki "Project wiki"
-qmd embed  # ~2GB models downloaded on first run
+# 1. Install hybrid dependencies
+pip install 'farmerp-wiki[hybrid]'    # installs qdrant-client + openai
+
+# 2. Start Qdrant (Docker)
+docker run -d -p 6333:6333 qdrant/qdrant
+
+# 3. Set OpenAI API key (for embeddings + LLM reranking)
+export OPENAI_API_KEY=sk-...
+
+# 4. Build both BM25 + Qdrant indexes
+python scripts/bm25_retriever.py index
+
+# 5. Search with hybrid pipeline
+python scripts/bm25_retriever.py search "auth" --backend hybrid
 ```
 
-qmd is fully optional. Without it, pure-Python BM25 works everywhere.
+**Retrieval pipeline (hybrid mode):**
+```
+Query → ┌─ BM25 (top 50) ────────── ranked list ─┐
+        │                                         ├→ RRF Fusion → LLM Rerank → top-K
+        └─ Qdrant semantic (top 50) ─ ranked list ─┘
+```
+
+**Configuration** (env vars or `.wiki/_config.json`):
+- `QDRANT_URL` — Qdrant server URL (default: `http://localhost:6333`)
+- `OPENAI_API_KEY` — Required for embeddings + LLM reranking
+- `OPENAI_EMBEDDING_MODEL` — Embedding model (default: `text-embedding-3-small`)
+- `RERANK_MODEL` — LLM for reranking (default: `gpt-4o-mini`)
+- `RERANK_TOP_N` — Candidates sent to LLM reranker (default: 20)
+- `RRF_K` — RRF constant (default: 60)
+
+Hybrid search is fully optional. Without it, pure-Python BM25 works everywhere with zero dependencies.
 
 ## Wiki Structure
 

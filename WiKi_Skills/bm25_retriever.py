@@ -35,87 +35,43 @@ from typing import List, Dict, Tuple, Optional, Any
 
 
 # ============================================================================
-# QMD INTEGRATION — Optional hybrid search backend (BM25 + vector + re-ranking)
+# HYBRID SEARCH — Optional Qdrant + RRF + LLM reranking backend
 # ============================================================================
 
-def _qmd_available() -> bool:
-    """Check if qmd CLI is installed and accessible."""
-    return shutil.which('qmd') is not None
-
-
-def _qmd_search(query: str, wiki_dir: Path, top_k: int = 10,
-                mode: str = 'query', output_format: str = 'json') -> Optional[List[Dict]]:
-    """
-    Run a search via qmd CLI. Returns parsed results or None on failure.
-
-    mode: 'search' (BM25 only), 'vsearch' (vector only), 'query' (hybrid + re-ranking)
-    """
-    cmd = ['qmd', mode, query, '--json', '-n', str(top_k)]
+def _hybrid_available() -> bool:
+    """Check if hybrid search dependencies (qdrant-client, openai) are installed."""
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60,
-            cwd=str(wiki_dir),
-        )
-        if result.returncode != 0:
-            print(f"  qmd {mode} failed: {result.stderr.strip()}", file=sys.stderr)
-            return None
-        data = json.loads(result.stdout)
-        # Normalize qmd output to match our result format
-        results = []
-        items = data if isinstance(data, list) else data.get('results', [])
-        for item in items:
-            results.append({
-                'chunk_id': item.get('docid', ''),
-                'score': round(item.get('score', 0.0), 4),
-                'filepath': item.get('path', item.get('displayPath', '')),
-                'title': item.get('title', ''),
-                'section': item.get('snippet', '')[:80],
-                'page_type': 'unknown',
-                'tags': [],
-                'content': item.get('snippet', item.get('body', '')),
-                'content_raw': item.get('body', item.get('snippet', '')),
-                'position': 0,
-                '_qmd': True,  # marker for qmd-sourced results
-            })
-        return results
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
-        print(f"  qmd error: {e}", file=sys.stderr)
-        return None
-
-
-def _qmd_update(wiki_dir: Path) -> bool:
-    """Re-index qmd collections and update embeddings. Returns True on success."""
-    try:
-        result = subprocess.run(
-            ['qmd', 'update'], capture_output=True, text=True,
-            timeout=120, cwd=str(wiki_dir),
-        )
-        if result.returncode != 0:
-            print(f"  qmd update failed: {result.stderr.strip()}", file=sys.stderr)
-            return False
-        # Embeddings update (may take longer on first run)
-        result = subprocess.run(
-            ['qmd', 'embed'], capture_output=True, text=True,
-            timeout=300, cwd=str(wiki_dir),
-        )
-        if result.returncode != 0:
-            print(f"  qmd embed failed: {result.stderr.strip()}", file=sys.stderr)
-            return False
-        return True
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"  qmd sync error: {e}", file=sys.stderr)
+        from qdrant_store import is_hybrid_available
+        return is_hybrid_available()
+    except ImportError:
         return False
 
 
-def _resolve_backend(requested: str) -> str:
-    """Resolve 'auto' backend to 'qmd' or 'bm25' based on availability."""
-    if requested == 'qmd':
-        if not _qmd_available():
-            print("  ⚠️  qmd not found, falling back to bm25", file=sys.stderr)
+def _hybrid_configured(wiki_dir: Optional[Path] = None) -> bool:
+    """Check if hybrid search is both available and configured."""
+    try:
+        from qdrant_store import is_hybrid_configured
+        return is_hybrid_configured(wiki_dir)
+    except ImportError:
+        return False
+
+
+def _resolve_backend(requested: str, wiki_dir: Optional[Path] = None) -> str:
+    """Resolve 'auto' backend to the best available option."""
+    if requested == 'hybrid':
+        if not _hybrid_configured(wiki_dir):
+            print("  ⚠️  Hybrid search not configured, falling back to bm25", file=sys.stderr)
+            print("     Install: pip install 'farmerp-wiki[hybrid]'", file=sys.stderr)
+            print("     Configure: OPENAI_API_KEY + Qdrant at localhost:6333", file=sys.stderr)
             return 'bm25'
-        return 'qmd'
+        return 'hybrid'
+    if requested == 'qdrant':
+        if not _hybrid_configured(wiki_dir):
+            print("  ⚠️  Qdrant not configured, falling back to bm25", file=sys.stderr)
+            return 'bm25'
+        return 'qdrant'
     if requested == 'auto':
-        return 'qmd' if _qmd_available() else 'bm25'
+        return 'hybrid' if _hybrid_configured(wiki_dir) else 'bm25'
     return 'bm25'
 
 
@@ -947,10 +903,11 @@ def build_marp_context(results: List[Dict], query: str) -> str:
 # ============================================================================
 
 def cmd_index(args):
-    """Build or rebuild the BM25 index."""
+    """Build or rebuild the BM25 index (and Qdrant if hybrid is configured)."""
     wiki_dir = None
     chunk_size = 800
     overlap_size = 100
+    bm25_only = False
     
     i = 0
     while i < len(args):
@@ -960,6 +917,8 @@ def cmd_index(args):
             chunk_size = int(args[i + 1]); i += 2
         elif args[i] == '--overlap' and i + 1 < len(args):
             overlap_size = int(args[i + 1]); i += 2
+        elif args[i] == '--bm25-only':
+            bm25_only = True; i += 1
         else:
             i += 1
     
@@ -968,14 +927,31 @@ def cmd_index(args):
     
     idx = index_wiki(str(wd), max_chunk_size=chunk_size, overlap=overlap_size)
     
-    # Save index
+    # Save BM25 index
     index_path = wd / '_bm25_index.json'
     idx.save(str(index_path))
     
-    print(f"   Chunks indexed: {idx.N}")
+    print(f"   BM25 chunks indexed: {idx.N}")
     print(f"   Unique terms: {len(idx.df)}")
     print(f"   Avg chunk length: {idx.avgdl:.0f} tokens")
     print(f"   Index saved: {index_path}")
+    
+    # Index to Qdrant if hybrid is configured and not --bm25-only
+    if not bm25_only and _hybrid_configured(wd):
+        try:
+            import time as _time
+            from qdrant_store import QdrantStore
+            t0 = _time.time()
+            store = QdrantStore(wiki_dir=wd)
+            store.drop_collection()
+            store.upsert_chunks(idx.chunks)
+            elapsed = _time.time() - t0
+            print(f"   Qdrant indexed: {idx.N} chunks ({elapsed:.1f}s)")
+        except Exception as e:
+            print(f"   ⚠️  Qdrant indexing failed: {e}", file=sys.stderr)
+            print(f"   BM25 index is still up to date.", file=sys.stderr)
+    elif not bm25_only and _hybrid_available():
+        print(f"   ℹ️  Hybrid deps installed but not configured (set OPENAI_API_KEY)")
     
     # Print breakdown by type
     type_counts = Counter(c.get('page_type', 'unknown') for c in idx.chunks)
@@ -992,6 +968,7 @@ def cmd_search(args):
     type_filter = None
     tag_filter = None
     backend = 'auto'
+    no_rerank = False
     query_parts = []
     
     i = 0
@@ -1006,34 +983,113 @@ def cmd_search(args):
             tag_filter = args[i + 1]; i += 2
         elif args[i] == '--backend' and i + 1 < len(args):
             backend = args[i + 1]; i += 2
+        elif args[i] == '--no-rerank':
+            no_rerank = True; i += 1
         else:
             query_parts.append(args[i]); i += 1
     
     if not query_parts:
-        print("Usage: bm25_retriever.py search 'query' [--top-k N] [--backend auto|bm25|qmd]", file=sys.stderr)
+        print("Usage: bm25_retriever.py search 'query' [--top-k N] [--backend auto|bm25|hybrid|qdrant]", file=sys.stderr)
         sys.exit(1)
     
     query = ' '.join(query_parts)
     wd = find_wiki_dir(wiki_dir)
-    backend = _resolve_backend(backend)
+    backend = _resolve_backend(backend, wd)
     
-    # qmd backend
-    if backend == 'qmd':
-        results = _qmd_search(query, wd, top_k=top_k, mode='search')
-        if results is None:
-            print("  Falling back to BM25...", file=sys.stderr)
-        else:
+    # Hybrid backend: BM25 + Qdrant + RRF + optional LLM rerank
+    if backend == 'hybrid':
+        try:
+            from qdrant_store import QdrantStore, _load_config
+            from fusion import hybrid_search
+            
+            config = _load_config(wd)
+            
+            # BM25 search
+            index_path = wd / '_bm25_index.json'
+            if not index_path.exists():
+                print("BM25 index not found. Building now...", file=sys.stderr)
+                cmd_index(['--wiki-dir', str(wd)])
+            idx = BM25Index()
+            idx.load(str(index_path))
+            bm25_results = idx.search(query, top_k=50,
+                                      page_type_filter=type_filter,
+                                      tag_filter=tag_filter)
+            
+            # Qdrant semantic search
+            store = QdrantStore(wiki_dir=wd)
+            qdrant_results = store.search(query, top_k=50,
+                                          page_type_filter=type_filter,
+                                          tag_filter=tag_filter)
+            
+            # Fuse + rerank
+            results = hybrid_search(
+                query=query,
+                bm25_results=bm25_results,
+                qdrant_results=qdrant_results,
+                rrf_k=config.get('rrf_k', 60),
+                rerank=not no_rerank,
+                rerank_top_n=config.get('rerank_top_n', 20),
+                rerank_model=config.get('rerank_model', 'gpt-4o-mini'),
+                openai_api_key=config.get('openai_api_key'),
+                top_k=top_k,
+            )
+            
             if not results:
                 print(f"No results for: {query}")
                 return
-            print(f"🔍 qmd Results for: \"{query}\" ({len(results)} hits)\n")
+            
+            label = "Hybrid" if not no_rerank else "Hybrid (no rerank)"
+            print(f"🔍 {label} Results for: \"{query}\" ({len(results)} hits)\n")
             for i_r, r in enumerate(results):
-                print(f"  {i_r+1}. [{r['score']:.2f}] {r['title']}")
-                print(f"     {r['filepath']}")
+                tags = ', '.join(r.get('tags', [])) if r.get('tags') else ''
+                bm25_r = r.get('bm25_rank')
+                qdrant_r = r.get('qdrant_rank')
+                rerank_s = r.get('rerank_score')
+                provenance = []
+                if bm25_r is not None:
+                    provenance.append(f"BM25#{bm25_r}")
+                if qdrant_r is not None:
+                    provenance.append(f"Qdrant#{qdrant_r}")
+                prov_str = ' + '.join(provenance) if provenance else ''
+                score_str = f"rrf={r.get('rrf_score', 0):.4f}"
+                if rerank_s is not None and rerank_s >= 0:
+                    score_str += f" rerank={rerank_s:.1f}"
+                
+                print(f"  {i_r+1}. [{score_str}] {r['title']} > {r['section']}")
+                print(f"     {r['filepath']} ({r['page_type']}) [{prov_str}]")
+                if tags:
+                    print(f"     tags: {tags}")
                 preview = r['content'][:150].replace('\n', ' ').strip()
                 print(f"     \"{preview}...\"")
                 print()
             return
+        except Exception as e:
+            print(f"  ⚠️  Hybrid search failed: {e}, falling back to BM25", file=sys.stderr)
+    
+    # Qdrant-only backend
+    if backend == 'qdrant':
+        try:
+            from qdrant_store import QdrantStore
+            store = QdrantStore(wiki_dir=wd)
+            results = store.search(query, top_k=top_k,
+                                   page_type_filter=type_filter,
+                                   tag_filter=tag_filter)
+            if not results:
+                print(f"No results for: {query}")
+                return
+            print(f"🔍 Qdrant Results for: \"{query}\" ({len(results)} hits)\n")
+            for i_r, r in enumerate(results):
+                tags = ', '.join(r.get('tags', [])) if r.get('tags') else ''
+                print(f"  {i_r+1}. [{r['score']:.4f}] {r['title']} > {r['section']}")
+                print(f"     {r['filepath']} ({r['page_type']})")
+                if tags:
+                    print(f"     tags: {tags}")
+                preview = r['content'][:150].replace('\n', ' ').strip()
+                print(f"     \"{preview}...\"")
+                print()
+            return
+        except Exception as e:
+            print(f"  ⚠️  Qdrant search failed: {e}, falling back to BM25", file=sys.stderr)
     
     # BM25 fallback
     index_path = wd / '_bm25_index.json'
@@ -1076,7 +1132,7 @@ def cmd_retrieve(args):
     freshness_weight = 0.0
     centrality_weight = 0.0
     backend = 'auto'
-    qmd_mode = 'query'  # search, vsearch, or query (hybrid)
+    no_rerank = False
     query_parts = []
     
     i = 0
@@ -1099,28 +1155,82 @@ def cmd_retrieve(args):
             centrality_weight = float(args[i + 1]); i += 2
         elif args[i] == '--backend' and i + 1 < len(args):
             backend = args[i + 1]; i += 2
-        elif args[i] == '--qmd-mode' and i + 1 < len(args):
-            qmd_mode = args[i + 1]; i += 2
+        elif args[i] == '--no-rerank':
+            no_rerank = True; i += 1
         else:
             query_parts.append(args[i]); i += 1
     
     if not query_parts:
-        print("Usage: bm25_retriever.py retrieve 'query' [--top-k N] [--format xml|json|marp] [--brief] [--backend auto|bm25|qmd]",
+        print("Usage: bm25_retriever.py retrieve 'query' [--top-k N] [--format xml|json|marp] [--brief] [--backend auto|bm25|hybrid|qdrant]",
               file=sys.stderr)
         sys.exit(1)
     
     query = ' '.join(query_parts)
     wd = find_wiki_dir(wiki_dir)
-    backend = _resolve_backend(backend)
+    backend = _resolve_backend(backend, wd)
     
-    # qmd backend — hybrid search with vector + BM25 + re-ranking
     results = None
-    if backend == 'qmd':
-        qmd_results = _qmd_search(query, wd, top_k=top_k, mode=qmd_mode)
-        if qmd_results is not None:
-            results = qmd_results
-        else:
-            print("  Falling back to BM25...", file=sys.stderr)
+    
+    # Hybrid backend: BM25 + Qdrant + RRF + LLM rerank
+    if backend == 'hybrid':
+        try:
+            from qdrant_store import QdrantStore, _load_config
+            from fusion import hybrid_search
+            
+            config = _load_config(wd)
+            
+            # BM25 search
+            index_path = wd / '_bm25_index.json'
+            if not index_path.exists():
+                idx = index_wiki(str(wd))
+                idx.save(str(index_path))
+            else:
+                idx = BM25Index()
+                idx.load(str(index_path))
+            
+            # Load centrality data if boosting requested
+            centrality_data = None
+            if centrality_weight > 0:
+                centrality_path = wd / '_centrality.json'
+                if centrality_path.exists():
+                    centrality_data = json.loads(centrality_path.read_text(encoding='utf-8'))
+            
+            bm25_results = idx.search(query, top_k=50,
+                                      page_type_filter=type_filter,
+                                      freshness_weight=freshness_weight,
+                                      centrality_data=centrality_data,
+                                      centrality_weight=centrality_weight)
+            
+            # Qdrant semantic search
+            store = QdrantStore(wiki_dir=wd)
+            qdrant_results = store.search(query, top_k=50,
+                                          page_type_filter=type_filter)
+            
+            # Fuse + rerank
+            results = hybrid_search(
+                query=query,
+                bm25_results=bm25_results,
+                qdrant_results=qdrant_results,
+                rrf_k=config.get('rrf_k', 60),
+                rerank=not no_rerank,
+                rerank_top_n=config.get('rerank_top_n', 20),
+                rerank_model=config.get('rerank_model', 'gpt-4o-mini'),
+                openai_api_key=config.get('openai_api_key'),
+                top_k=top_k,
+            )
+        except Exception as e:
+            print(f"  ⚠️  Hybrid retrieve failed: {e}, falling back to BM25", file=sys.stderr)
+            results = None
+    
+    # Qdrant-only backend
+    if backend == 'qdrant' and results is None:
+        try:
+            from qdrant_store import QdrantStore
+            store = QdrantStore(wiki_dir=wd)
+            results = store.search(query, top_k=top_k,
+                                   page_type_filter=type_filter)
+        except Exception as e:
+            print(f"  ⚠️  Qdrant retrieve failed: {e}, falling back to BM25", file=sys.stderr)
     
     # BM25 fallback
     if results is None:
@@ -1319,16 +1429,21 @@ def cmd_ingest_file(args):
             index_path = wd / '_bm25_index.json'
             idx.save(str(index_path))
             print(f"   Index rebuilt: {idx.N} chunks, {len(idx.df)} terms")
+            
+            # Sync Qdrant if hybrid is configured
+            if _hybrid_configured(wd):
+                print("🔄 Syncing Qdrant index...")
+                try:
+                    from qdrant_store import QdrantStore
+                    store = QdrantStore(wiki_dir=wd)
+                    store.drop_collection()
+                    store.upsert_chunks(idx.chunks)
+                    print(f"   Qdrant synced: {idx.N} chunks")
+                except Exception as e:
+                    print(f"   ⚠️  Qdrant sync failed: {e}", file=sys.stderr)
+                    print(f"   BM25 index is still up to date.", file=sys.stderr)
         except Exception as e:
             print(f"   ⚠️  Index rebuild failed: {e}", file=sys.stderr)
-        
-        # Sync qmd if available (keeps hybrid search index in sync)
-        if _qmd_available():
-            print("🔄 Syncing qmd index...")
-            if _qmd_update(wd):
-                print("   qmd index synced")
-            else:
-                print("   ⚠️  qmd sync failed (BM25 index is still up to date)", file=sys.stderr)
 
 
 def _ingest_url(url: str, raw_dir: Path, wiki_dir: Path) -> Dict:
@@ -1412,33 +1527,40 @@ def _ingest_url(url: str, raw_dir: Path, wiki_dir: Path) -> Dict:
 # ============================================================================
 
 USAGE = """
-wiki-agent BM25 Retriever
+wiki-agent BM25 + Hybrid Retriever
 
 Usage:
-    bm25_retriever.py index     [--wiki-dir PATH] [--chunk-size N] [--overlap N]
+    bm25_retriever.py index     [--wiki-dir PATH] [--chunk-size N] [--overlap N] [--bm25-only]
     bm25_retriever.py search    QUERY [--top-k N] [--type TYPE] [--tag TAG]
-                                      [--backend auto|bm25|qmd] [--wiki-dir PATH]
+                                      [--backend auto|bm25|hybrid|qdrant] [--no-rerank]
+                                      [--wiki-dir PATH]
     bm25_retriever.py retrieve  QUERY [--top-k N] [--format xml|json|marp] [--brief]
                                       [--freshness-weight F] [--centrality-weight F]
-                                      [--backend auto|bm25|qmd] [--qmd-mode search|vsearch|query]
+                                      [--backend auto|bm25|hybrid|qdrant] [--no-rerank]
                                       [--max-tokens N] [--wiki-dir PATH]
     bm25_retriever.py ingest    FILE|URL [FILE|URL...] [--wiki-dir PATH] [--no-index]
     bm25_retriever.py stats     [--wiki-dir PATH]
 
 Commands:
-    index      Build/rebuild BM25 index from all wiki markdown pages
+    index      Build/rebuild BM25 index (+ Qdrant if hybrid configured)
     search     Search and display ranked results (human-readable)
     retrieve   Search and output full context for RAG pipeline (XML, JSON, or Marp)
     ingest     Copy raw files or fetch URLs into wiki, extract text, auto-rebuild index
     stats      Show index statistics and top terms
 
 Search backend:
-    --backend auto        Use qmd if installed, otherwise BM25 (default)
-    --backend bm25        Force pure-Python BM25 search
-    --backend qmd         Force qmd hybrid search (requires: npm install -g @tobilu/qmd)
-    --qmd-mode query      Hybrid: BM25 + vector + re-ranking (default, best quality)
-    --qmd-mode search     BM25 only via qmd (fast)
-    --qmd-mode vsearch    Vector semantic search only
+    --backend auto        Use hybrid if configured, otherwise BM25 (default)
+    --backend bm25        Force pure-Python BM25 search (zero dependencies)
+    --backend hybrid      BM25 + Qdrant semantic + RRF fusion + LLM reranking
+    --backend qdrant      Qdrant semantic search only (no BM25)
+    --no-rerank           Skip LLM reranking step (use RRF scores directly)
+    --bm25-only           Index command: skip Qdrant, only build BM25 index
+
+Hybrid search setup:
+    1. pip install 'farmerp-wiki[hybrid]'   (installs qdrant-client + openai)
+    2. docker run -p 6333:6333 qdrant/qdrant
+    3. export OPENAI_API_KEY=sk-...
+    4. python bm25_retriever.py index       (builds BM25 + Qdrant indexes)
 
 Retrieval flags:
     --brief               Return title + section + first 2 sentences per chunk (~300 tokens)
