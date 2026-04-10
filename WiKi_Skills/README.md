@@ -85,14 +85,14 @@ python scripts/bm25_retriever.py stats
 | `index` | Build/rebuild BM25 index from all wiki pages |
 | `search QUERY` | Ranked results (human-readable) |
 | `retrieve QUERY` | Full chunk context for LLM consumption (XML, JSON, or Marp) |
-| `ingest FILE\|URL` | Ingest file or URL, extract text, auto-rebuild index (+ qmd sync) |
+| `ingest FILE\|URL` | Ingest file or URL, extract text, auto-copy images to `raw/assets/`, auto-rebuild index |
 | `stats` | Index statistics, term distribution, chunk counts |
 
 **Key flags:** `--top-k N`, `--type entity|concept|source`, `--format xml|json|marp`, `--brief`, `--freshness-weight F`, `--centrality-weight F`, `--no-index`, `--chunk-size N`, `--backend auto|bm25|qmd`, `--qmd-mode search|vsearch|query`
 
 ## The Pipeline
 
-1. **Ingest** — Document arrives → copied to `raw/` → LLM creates source summary + entity pages + concept pages → cross-references built → BM25 index auto-rebuilt
+1. **Ingest** — Document arrives → copied to `raw/` → images auto-extracted to `raw/assets/` → LLM creates source summary + entity pages + concept pages → cross-references built → BM25 index auto-rebuilt
 2. **Query** — User asks question → BM25 retrieves top-k chunks (with optional freshness/centrality boosting) → LLM synthesizes answer with citations → valuable answers filed back as analysis pages
 3. **Lint** — Health check for orphan pages, broken links, asymmetric cross-references, stale content, missing frontmatter fields
 

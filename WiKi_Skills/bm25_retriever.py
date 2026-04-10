@@ -696,6 +696,8 @@ def index_wiki(wiki_dir: str, max_chunk_size: int = 800, overlap: int = 100) -> 
 # DOCUMENT INGESTION — Reads raw documents and prepares for wiki integration
 # ============================================================================
 
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico', '.tiff', '.tif'}
+
 SUPPORTED_EXTENSIONS = {
     '.md', '.txt', '.rst', '.text',
     '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs', '.rb',
@@ -706,6 +708,93 @@ SUPPORTED_EXTENSIONS = {
     '.sql', '.r', '.m', '.lua',
     '.dockerfile',
 }
+
+
+def _ensure_assets_dir(wiki_dir: Path) -> Path:
+    """Create and return raw/assets/ directory."""
+    assets = wiki_dir / 'raw' / 'assets'
+    assets.mkdir(parents=True, exist_ok=True)
+    return assets
+
+
+def _extract_image_refs(content: str) -> List[str]:
+    """Extract image paths/URLs from markdown and HTML content."""
+    refs = []
+    # Markdown: ![alt](path)
+    refs.extend(re.findall(r'!\[[^\]]*\]\(([^)]+)\)', content))
+    # HTML: <img src="...">
+    refs.extend(re.findall(r'<img\s[^>]*src=["\']([^"\']+)["\']', content, re.IGNORECASE))
+    return refs
+
+
+def _copy_local_images(image_refs: List[str], source_dir: Path,
+                       assets_dir: Path) -> Dict[str, str]:
+    """
+    Copy locally-referenced images to assets_dir.
+    Returns a mapping {original_ref: new_relative_path} for path rewriting.
+    """
+    rewrite_map = {}
+    for ref in image_refs:
+        if ref.startswith(('http://', 'https://', 'data:')):
+            continue  # skip URLs and data URIs — handled separately
+        img_path = (source_dir / ref).resolve()
+        if not img_path.is_file():
+            continue
+        if img_path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        dest = assets_dir / img_path.name
+        counter = 1
+        while dest.exists() and dest.name != img_path.name:
+            dest = assets_dir / f"{img_path.stem}_{counter}{img_path.suffix}"
+            counter += 1
+        if not dest.exists():
+            shutil.copy2(str(img_path), str(dest))
+        # Build relative path from raw/ to raw/assets/
+        rewrite_map[ref] = f"assets/{dest.name}"
+    return rewrite_map
+
+
+def _download_remote_images(image_refs: List[str],
+                            assets_dir: Path) -> Dict[str, str]:
+    """
+    Download remote image URLs to assets_dir.
+    Returns a mapping {original_url: new_relative_path} for path rewriting.
+    """
+    import urllib.request
+    import urllib.error
+    from urllib.parse import urlparse
+
+    rewrite_map = {}
+    for ref in image_refs:
+        if not ref.startswith(('http://', 'https://')):
+            continue
+        parsed = urlparse(ref)
+        fname = Path(parsed.path).name
+        if not fname or Path(fname).suffix.lower() not in IMAGE_EXTENSIONS:
+            # Try to infer extension from URL or skip
+            continue
+        dest = assets_dir / fname
+        counter = 1
+        stem = Path(fname).stem
+        suffix = Path(fname).suffix
+        while dest.exists():
+            dest = assets_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+        try:
+            req = urllib.request.Request(ref, headers={'User-Agent': 'Wiki-Agent/1.0'})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                dest.write_bytes(resp.read())
+            rewrite_map[ref] = f"assets/{dest.name}"
+        except Exception:
+            pass  # skip images that fail to download
+    return rewrite_map
+
+
+def _rewrite_image_paths(content: str, rewrite_map: Dict[str, str]) -> str:
+    """Replace image references in content with new paths."""
+    for old_ref, new_ref in rewrite_map.items():
+        content = content.replace(old_ref, new_ref)
+    return content
 
 
 def read_document(filepath: str) -> Dict:
@@ -1159,7 +1248,9 @@ def cmd_ingest_file(args):
             doc = _ingest_url(fp, raw_dir, wd)
             results.append(doc)
             if doc.get('readable'):
-                print(f"  ✅ Fetched: {fp} → {doc.get('raw_copy', '')}")
+                img_count = len(doc.get('images_copied', []))
+                img_msg = f" + {img_count} images" if img_count else ""
+                print(f"  ✅ Fetched: {fp} → {doc.get('raw_copy', '')}{img_msg}")
             else:
                 print(f"  ⚠️  Failed to fetch: {fp} — {doc.get('error', 'unknown')}")
             continue
@@ -1181,10 +1272,28 @@ def cmd_ingest_file(args):
         doc = read_document(str(p))
         doc['raw_copy'] = str(dest.relative_to(wd))
         
+        # Auto-handle images: detect references, copy to raw/assets/, rewrite paths
+        images_copied = []
+        if doc.get('readable') and doc.get('content'):
+            image_refs = _extract_image_refs(doc['content'])
+            if image_refs:
+                assets_dir = _ensure_assets_dir(wd)
+                source_dir = p.resolve().parent
+                local_map = _copy_local_images(image_refs, source_dir, assets_dir)
+                remote_map = _download_remote_images(image_refs, assets_dir)
+                rewrite_map = {**local_map, **remote_map}
+                if rewrite_map:
+                    rewritten = _rewrite_image_paths(doc['content'], rewrite_map)
+                    dest.write_text(rewritten, encoding='utf-8')
+                    doc['content'] = rewritten
+                    images_copied = list(rewrite_map.values())
+        doc['images_copied'] = images_copied
+        
         results.append(doc)
         
         if doc['readable']:
-            print(f"  ✅ Ingested: {p.name} ({doc.get('lines', 0)} lines) → {dest.relative_to(wd)}")
+            img_msg = f" + {len(images_copied)} images" if images_copied else ""
+            print(f"  ✅ Ingested: {p.name} ({doc.get('lines', 0)} lines){img_msg} → {dest.relative_to(wd)}")
         else:
             print(f"  ⚠️  Copied but not readable: {p.name} — {doc.get('error', 'unknown format')}")
     
@@ -1198,6 +1307,7 @@ def cmd_ingest_file(args):
         'size_bytes': r.get('size_bytes', 0),
         'raw_copy': r.get('raw_copy', ''),
         'error': r.get('error', ''),
+        'images_copied': r.get('images_copied', []),
         'content_preview': r.get('content', '')[:500] if r.get('readable') else '',
     } for r in results], indent=2, ensure_ascii=False))
 
@@ -1222,7 +1332,7 @@ def cmd_ingest_file(args):
 
 
 def _ingest_url(url: str, raw_dir: Path, wiki_dir: Path) -> Dict:
-    """Fetch a URL, strip HTML to plain text, and save as markdown in raw/."""
+    """Fetch a URL, strip HTML to plain text, download images, and save as markdown in raw/."""
     import urllib.request
     import urllib.error
 
@@ -1237,6 +1347,19 @@ def _ingest_url(url: str, raw_dir: Path, wiki_dir: Path) -> Dict:
         with urllib.request.urlopen(req, timeout=30) as resp:
             raw_html = resp.read().decode('utf-8', errors='replace')
 
+        # Extract image URLs from HTML before stripping tags
+        from urllib.parse import urlparse, urljoin
+        img_urls = re.findall(r'<img\s[^>]*src=["\']([^"\']+)["\']', raw_html, re.IGNORECASE)
+        # Resolve relative URLs to absolute
+        img_urls = [urljoin(url, u) for u in img_urls]
+
+        # Download images to raw/assets/
+        images_copied = []
+        if img_urls:
+            assets_dir = _ensure_assets_dir(wiki_dir)
+            rewrite_map = _download_remote_images(img_urls, assets_dir)
+            images_copied = list(rewrite_map.values())
+
         # Strip HTML tags to get plain text
         text = re.sub(r'<script[^>]*>.*?</script>', '', raw_html, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
@@ -1246,8 +1369,13 @@ def _ingest_url(url: str, raw_dir: Path, wiki_dir: Path) -> Dict:
         # Convert to basic markdown
         text = re.sub(r' {2,}', '\n\n', text)
 
+        # Append image references as markdown at the end
+        if images_copied:
+            text += '\n\n---\n\n**Images:**\n'
+            for img_path in images_copied:
+                text += f'![image]({img_path})\n'
+
         # Generate filename from URL
-        from urllib.parse import urlparse
         parsed = urlparse(url)
         slug = re.sub(r'[^a-z0-9]+', '-', parsed.path.lower().strip('/')).strip('-')
         if not slug:
@@ -1272,6 +1400,7 @@ def _ingest_url(url: str, raw_dir: Path, wiki_dir: Path) -> Dict:
         result['lines'] = len(text.split('\n'))
         result['size_bytes'] = len(content.encode('utf-8'))
         result['readable'] = True
+        result['images_copied'] = images_copied
     except (urllib.error.URLError, Exception) as e:
         result['readable'] = False
         result['error'] = f'Failed to fetch URL: {e}'

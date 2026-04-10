@@ -515,18 +515,24 @@ installed, everything works exactly as before with pure-Python BM25.
 
 ## Image Handling
 
-Images referenced in source documents should be stored in `raw/assets/`.
+Images are **automatically handled** during ingestion. The `ingest` command:
 
-**Workflow for documents with images:**
-1. Copy images to `raw/assets/` (manually or via Obsidian Web Clipper + download)
-2. Reference in wiki pages with relative paths: `![Description](../raw/assets/image.png)`
-3. LLMs can't read markdown with inline images in one pass — read the text first,
-   then view referenced images separately for additional context
-4. In Obsidian: Settings → Files and links → set "Attachment folder path" to
-   `raw/assets/`. Bind "Download attachments" to a hotkey (e.g. Ctrl+Shift+D)
+1. **Local files**: Detects `![alt](path)` and `<img src="...">` references in
+   ingested documents, copies referenced images to `raw/assets/`, and rewrites
+   paths in the raw copy so they point to `assets/filename.png`.
+2. **URLs**: Extracts `<img>` tags from fetched HTML, downloads image files to
+   `raw/assets/`, and appends markdown image references to the saved document.
+3. Supported formats: `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.webp`, `.bmp`, `.ico`, `.tiff`
 
-**Obsidian Web Clipper** is useful for converting web articles to markdown and
-downloading their images locally so URLs don't break.
+**Wiki page references**: Use relative paths — `![Description](../raw/assets/image.png)`
+
+**LLM note**: LLMs can't read markdown with inline images in one pass — read the text
+first, then view referenced images separately for additional context.
+
+**Obsidian integration** (optional):
+- Settings → Files and links → set "Attachment folder path" to `raw/assets/`
+- Bind "Download attachments" to a hotkey (e.g. Ctrl+Shift+D)
+- **Obsidian Web Clipper** is useful for converting web articles to markdown
 
 ---
 
