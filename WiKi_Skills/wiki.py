@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-wiki-agent CLI helper — assists the LLM agent with wiki operations.
+wiki-agent CLI — document-centric knowledge base management.
 
 Usage:
-    python wiki.py init [--root PATH]        Initialize a wiki in a project
-    python wiki.py status                    Show wiki stats
-    python wiki.py search QUERY              Search wiki pages by keyword
-    python wiki.py lint                      Run health checks
-    python wiki.py orphans                   Find orphan pages (no inbound links)
-    python wiki.py missing                   Find mentioned but missing pages
-    python wiki.py graph                     Show link graph summary
+    python wiki.py init --wiki-dir PATH [--name NAME] [--description DESC]
+    python wiki.py status   [--wiki-dir PATH]
+    python wiki.py search   QUERY [--wiki-dir PATH]
+    python wiki.py compile  [--all] [--wiki-dir PATH]
+    python wiki.py recompile FILE [--wiki-dir PATH]
+    python wiki.py lint     [--wiki-dir PATH]
+    python wiki.py orphans  [--wiki-dir PATH]
+    python wiki.py graph    [--wiki-dir PATH] [--export]
 """
 
 import os
@@ -20,75 +21,6 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
-# --- Project root detection ---
-
-PROJECT_MARKERS = [
-    '.git', 'package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod',
-    'Makefile', 'CMakeLists.txt', 'build.gradle', 'pom.xml', 'Gemfile',
-    'composer.json', 'mix.exs', 'stack.yaml', 'dune-project',
-    'README.md', 'README.rst', 'README.txt',
-]
-
-TECH_INDICATORS = {
-    'package.json': 'JavaScript/TypeScript (Node.js)',
-    'tsconfig.json': 'TypeScript',
-    'pyproject.toml': 'Python',
-    'setup.py': 'Python',
-    'requirements.txt': 'Python',
-    'Cargo.toml': 'Rust',
-    'go.mod': 'Go',
-    'Gemfile': 'Ruby',
-    'composer.json': 'PHP',
-    'pom.xml': 'Java (Maven)',
-    'build.gradle': 'Java/Kotlin (Gradle)',
-    'mix.exs': 'Elixir',
-    'stack.yaml': 'Haskell',
-    'CMakeLists.txt': 'C/C++',
-    'Makefile': 'Make-based build',
-    'Dockerfile': 'Docker',
-    'docker-compose.yml': 'Docker Compose',
-    '.github/workflows': 'GitHub Actions CI',
-}
-
-
-def find_project_root(start=None):
-    """Walk up from start to find a project root."""
-    p = Path(start or os.getcwd()).resolve()
-    for d in [p] + list(p.parents):
-        for marker in PROJECT_MARKERS:
-            if (d / marker).exists():
-                return d
-    return Path(os.getcwd()).resolve()
-
-
-def detect_tech_stack(root):
-    """Detect technologies used in the project."""
-    found = []
-    for indicator, tech in TECH_INDICATORS.items():
-        if (root / indicator).exists():
-            found.append(tech)
-    return found if found else ['Unknown']
-
-
-def detect_project_type(root):
-    """Guess project type from structure."""
-    has_src = (root / 'src').is_dir()
-    has_lib = (root / 'lib').is_dir()
-    has_app = (root / 'app').is_dir()
-    has_docs = (root / 'docs').is_dir()
-    has_tests = (root / 'tests').is_dir() or (root / 'test').is_dir()
-    has_public = (root / 'public').is_dir()
-
-    if has_public and (has_src or has_app):
-        return 'Web Application'
-    if has_lib and not has_app:
-        return 'Library'
-    if has_src and has_tests:
-        return 'Software Project'
-    if has_docs and not has_src:
-        return 'Documentation'
-    return 'General Project'
-
 
 # --- Wiki directory management ---
 
@@ -96,15 +28,52 @@ WIKI_DIR = '.wiki'
 SUBDIRS = ['sources', 'entities', 'concepts', 'analyses', 'raw', 'raw/assets']
 
 
-def wiki_root(project_root=None):
-    root = find_project_root(project_root)
-    return root / WIKI_DIR
+def _parse_wiki_dir(args):
+    """Extract --wiki-dir PATH from args, return (wiki_dir_path | None, remaining_args)."""
+    rest = []
+    wiki_dir = None
+    i = 0
+    while i < len(args):
+        if args[i] == '--wiki-dir' and i + 1 < len(args):
+            wiki_dir = args[i + 1]
+            i += 2
+        else:
+            rest.append(args[i])
+            i += 1
+    return wiki_dir, rest
 
 
-def ensure_wiki(project_root=None):
-    wr = wiki_root(project_root)
+def find_wiki_dir(explicit: str = None) -> Path:
+    """Resolve the .wiki directory from an explicit path or cwd fallback."""
+    if explicit:
+        p = Path(explicit).resolve()
+        # If the user pointed directly at a .wiki dir, use it
+        if p.name == WIKI_DIR and p.is_dir():
+            return p
+        # Otherwise treat it as the parent that contains .wiki/
+        candidate = p / WIKI_DIR
+        if candidate.is_dir():
+            return candidate
+        # For init, the dir may not exist yet — return the expected path
+        return candidate
+
+    # Fallback: walk up from cwd looking for .wiki/
+    cwd = Path(os.getcwd()).resolve()
+    for d in [cwd] + list(cwd.parents):
+        candidate = d / WIKI_DIR
+        if candidate.is_dir():
+            return candidate
+
+    # Default: .wiki under cwd (for init)
+    return cwd / WIKI_DIR
+
+
+def ensure_wiki(wiki_dir_arg: str = None) -> Path:
+    """Find and validate the wiki directory exists."""
+    wr = find_wiki_dir(wiki_dir_arg)
     if not wr.exists():
-        print(f"Error: No wiki found at {wr}. Run 'wiki.py init' first.", file=sys.stderr)
+        print(f"Error: No wiki found at {wr}. Run 'wiki.py init --wiki-dir PATH' first.",
+              file=sys.stderr)
         sys.exit(1)
     return wr
 
@@ -112,69 +81,45 @@ def ensure_wiki(project_root=None):
 # --- Commands ---
 
 def cmd_init(args):
-    root_arg = None
-    if '--root' in args:
-        idx = args.index('--root')
-        if idx + 1 < len(args):
-            root_arg = args[idx + 1]
+    wiki_dir_arg, rest = _parse_wiki_dir(args)
+    name = None
+    description = ''
 
-    root = find_project_root(root_arg)
-    wr = root / WIKI_DIR
+    i = 0
+    while i < len(rest):
+        if rest[i] == '--name' and i + 1 < len(rest):
+            name = rest[i + 1]; i += 2
+        elif rest[i] == '--description' and i + 1 < len(rest):
+            description = rest[i + 1]; i += 2
+        else:
+            i += 1
+
+    wr = find_wiki_dir(wiki_dir_arg)
     today = datetime.now().strftime('%Y-%m-%d')
 
     if wr.exists():
         print(f"Wiki already exists at {wr}")
         return
 
+    if not name:
+        name = wr.parent.name or 'My Wiki'
+
     # Create directories
     for sub in SUBDIRS:
         (wr / sub).mkdir(parents=True, exist_ok=True)
 
-    # Detect project info
-    tech = detect_tech_stack(root)
-    ptype = detect_project_type(root)
-    pname = root.name
-
-    # Read README if available
-    readme_content = ''
-    for readme in ['README.md', 'README.rst', 'README.txt', 'README']:
-        rp = root / readme
-        if rp.exists():
-            try:
-                readme_content = rp.read_text(encoding='utf-8')[:3000]
-            except:
-                pass
-            break
-
-    # Top-level file listing
-    top_files = sorted([
-        f.name for f in root.iterdir()
-        if not f.name.startswith('.') and f.name != WIKI_DIR
-    ])[:30]
-
-    # Directory listing
-    top_dirs = sorted([
-        f.name for f in root.iterdir()
-        if f.is_dir() and not f.name.startswith('.') and f.name != WIKI_DIR
-    ])[:20]
-
+    # Minimal discovery metadata — no project/tech detection
     info = {
-        'project_name': pname,
-        'project_type': ptype,
-        'tech_stack': tech,
-        'top_files': top_files,
-        'top_dirs': top_dirs,
-        'has_readme': bool(readme_content),
-        'readme_preview': readme_content[:500] if readme_content else '',
-        'root': str(root),
-        'date': today,
+        'name': name,
+        'description': description,
+        'date_created': today,
+        'date_updated': today,
     }
 
-    # Write discovery report for the LLM to use
     report_path = wr / '_discovery.json'
     report_path.write_text(json.dumps(info, indent=2), encoding='utf-8')
 
-    # Create minimal log.md
+    # Create log.md
     log_content = f"""---
 title: Wiki Log
 type: meta
@@ -185,14 +130,12 @@ updated: {today}
 # Wiki Log
 
 ## [{today}] init | Wiki Initialized
-- Project: {pname}
-- Type: {ptype}
-- Tech Stack: {', '.join(tech)}
-- Root: {root}
+- Name: {name}
+- Description: {description or '(none)'}
 """
     (wr / 'log.md').write_text(log_content, encoding='utf-8')
 
-    # Create minimal index.md
+    # Create index.md
     index_content = f"""---
 title: Wiki Index
 type: meta
@@ -200,10 +143,10 @@ created: {today}
 updated: {today}
 ---
 
-# {pname} — Wiki Index
+# {name} — Wiki Index
 
 ## Overview
-- [Project Overview](overview.md)
+- [Overview](overview.md)
 
 ## Sources
 _No sources ingested yet._
@@ -220,16 +163,17 @@ _No analyses yet._
     (wr / 'index.md').write_text(index_content, encoding='utf-8')
 
     print(f"✅ Wiki initialized at {wr}")
-    print(f"   Project: {pname} ({ptype})")
-    print(f"   Tech: {', '.join(tech)}")
-    print(f"   Directories: {', '.join(top_dirs[:10])}")
-    print(f"   Discovery report: {report_path}")
-    print(f"\n   Next: The LLM agent should read _discovery.json and generate")
-    print(f"   SCHEMA.md and overview.md tailored to this project.")
+    print(f"   Name: {name}")
+    if description:
+        print(f"   Description: {description}")
+    print(f"   Discovery: {report_path}")
+    print(f"\n   Next: ingest documents with")
+    print(f"     python bm25_retriever.py ingest FILE [--wiki-dir {wr.parent}]")
 
 
 def cmd_status(args):
-    wr = ensure_wiki()
+    wiki_dir_arg, rest = _parse_wiki_dir(args)
+    wr = ensure_wiki(wiki_dir_arg)
     counts = {}
     for sub in ['sources', 'entities', 'concepts', 'analyses']:
         d = wr / sub
@@ -244,6 +188,18 @@ def cmd_status(args):
     if log_path.exists():
         log_entries = log_path.read_text(encoding='utf-8').count('\n## [')
 
+    # Show compile state if available
+    compile_state_path = wr / '_compile_state.json'
+    compiled = 0
+    pending = 0
+    if compile_state_path.exists():
+        try:
+            state = json.loads(compile_state_path.read_text(encoding='utf-8'))
+            compiled = sum(1 for v in state.values() if v.get('compiled'))
+            pending = sum(1 for v in state.values() if not v.get('compiled'))
+        except (json.JSONDecodeError, OSError):
+            pass
+
     print(f"📊 Wiki Status ({wr})")
     print(f"   Sources:  {counts['sources']}")
     print(f"   Entities: {counts['entities']}")
@@ -251,14 +207,18 @@ def cmd_status(args):
     print(f"   Analyses: {counts['analyses']}")
     print(f"   Total pages: {total}")
     print(f"   Log entries: {log_entries}")
+    if compiled or pending:
+        print(f"   Compiled:  {compiled} raw files")
+        print(f"   Pending:   {pending} raw files")
 
 
 def cmd_search(args):
-    if not args:
-        print("Usage: wiki.py search QUERY", file=sys.stderr)
+    wiki_dir_arg, rest = _parse_wiki_dir(args)
+    if not rest:
+        print("Usage: wiki.py search QUERY [--wiki-dir PATH]", file=sys.stderr)
         sys.exit(1)
-    query = ' '.join(args).lower()
-    wr = ensure_wiki()
+    query = ' '.join(rest).lower()
+    wr = ensure_wiki(wiki_dir_arg)
 
     results = []
     for sub in ['sources', 'entities', 'concepts', 'analyses']:
@@ -306,7 +266,8 @@ def cmd_search(args):
 
 
 def cmd_lint(args):
-    wr = ensure_wiki()
+    wiki_dir_arg, rest = _parse_wiki_dir(args)
+    wr = ensure_wiki(wiki_dir_arg)
 
     issues = []
 
@@ -425,12 +386,63 @@ def cmd_lint(args):
 
 def cmd_orphans(args):
     """Convenience wrapper: just show orphan pages."""
-    # Reuse lint logic but filter
-    cmd_lint(args)  # For now just run full lint
+    cmd_lint(args)
+
+
+def cmd_compile(args):
+    """Compile un-compiled raw files into wiki pages using LLM."""
+    wiki_dir_arg, rest = _parse_wiki_dir(args)
+    wr = ensure_wiki(wiki_dir_arg)
+    compile_all = '--all' in rest
+
+    try:
+        from wiki_compiler import compile_all_pending, compile_file
+    except ImportError:
+        print("Error: wiki_compiler module not found.", file=sys.stderr)
+        sys.exit(1)
+
+    if compile_all:
+        results = compile_all_pending(wr)
+        if not results:
+            print("✅ Nothing to compile — all raw files already processed.")
+        else:
+            print(f"✅ Compiled {len(results)} files.")
+            for r in results:
+                print(f"   {r['raw_file']}: {len(r.get('pages_created', []))} pages")
+    else:
+        # Compile specific files passed as positional args
+        files = [a for a in rest if not a.startswith('--')]
+        if not files:
+            print("Usage: wiki.py compile [--all] [FILE...] [--wiki-dir PATH]", file=sys.stderr)
+            sys.exit(1)
+        for f in files:
+            result = compile_file(wr, f)
+            print(f"   {f}: {len(result.get('pages_created', []))} pages")
+
+
+def cmd_recompile(args):
+    """Force re-compile a specific raw file."""
+    wiki_dir_arg, rest = _parse_wiki_dir(args)
+    wr = ensure_wiki(wiki_dir_arg)
+    files = [a for a in rest if not a.startswith('--')]
+    if not files:
+        print("Usage: wiki.py recompile FILE [--wiki-dir PATH]", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        from wiki_compiler import compile_file
+    except ImportError:
+        print("Error: wiki_compiler module not found.", file=sys.stderr)
+        sys.exit(1)
+
+    for f in files:
+        result = compile_file(wr, f, force=True)
+        print(f"   {f}: {len(result.get('pages_created', []))} pages (recompiled)")
 
 
 def cmd_graph(args):
-    wr = ensure_wiki()
+    wiki_dir_arg, rest = _parse_wiki_dir(args)
+    wr = ensure_wiki(wiki_dir_arg)
 
     nodes = set()
     edges = []
@@ -477,7 +489,7 @@ def cmd_graph(args):
             print(f"     {page}: {count} connections")
 
     # Export centrality data as JSON for BM25 freshness/hub boosting
-    if '--export' in args:
+    if '--export' in rest:
         centrality_data = {page: in_degree.get(page, 0) for page in nodes}
         export_path = wr / '_centrality.json'
         export_path.write_text(json.dumps(centrality_data, indent=2), encoding='utf-8')
@@ -496,9 +508,11 @@ def main():
         'init': cmd_init,
         'status': cmd_status,
         'search': cmd_search,
+        'compile': cmd_compile,
+        'recompile': cmd_recompile,
         'lint': cmd_lint,
         'orphans': cmd_orphans,
-        'missing': cmd_lint,  # lint covers this
+        'missing': cmd_lint,
         'graph': cmd_graph,
     }
 

@@ -1323,6 +1323,130 @@ def cmd_stats(args):
         print(f"     \"{term}\": in {df}/{idx.N} chunks ({100*df/idx.N:.0f}%)")
 
 
+def cmd_answer(args):
+    """
+    Retrieve relevant chunks and synthesize an answer using LLM.
+    
+    Flags:
+        --raw         Skip LLM synthesis, return raw chunks only
+        --file-answer File the answer as an analysis page in the wiki
+        --top-k N     Number of chunks to retrieve (default 5)
+        --backend     Search backend: auto|bm25|hybrid|qdrant
+        --no-rerank   Skip LLM reranking
+        --wiki-dir    Path to wiki
+    """
+    wiki_dir = None
+    query_parts = []
+    top_k = 5
+    raw_mode = False
+    file_answer_flag = False
+    backend = 'auto'
+    no_rerank = False
+
+    i = 0
+    while i < len(args):
+        if args[i] == '--wiki-dir' and i + 1 < len(args):
+            wiki_dir = args[i + 1]; i += 2
+        elif args[i] == '--top-k' and i + 1 < len(args):
+            top_k = int(args[i + 1]); i += 2
+        elif args[i] == '--backend' and i + 1 < len(args):
+            backend = args[i + 1]; i += 2
+        elif args[i] == '--raw':
+            raw_mode = True; i += 1
+        elif args[i] == '--file-answer':
+            file_answer_flag = True; i += 1
+        elif args[i] == '--no-rerank':
+            no_rerank = True; i += 1
+        else:
+            query_parts.append(args[i]); i += 1
+
+    if not query_parts:
+        print("Usage: bm25_retriever.py answer QUERY [--top-k N] [--wiki-dir PATH] "
+              "[--raw] [--file-answer]", file=sys.stderr)
+        sys.exit(1)
+
+    query = ' '.join(query_parts)
+    wd = find_wiki_dir(wiki_dir)
+    backend = _resolve_backend(backend, wd)
+
+    # Retrieve chunks using the existing search infrastructure
+    index_path = wd / '_bm25_index.json'
+    if not index_path.exists():
+        print("No index found. Run 'bm25_retriever.py index' first.", file=sys.stderr)
+        sys.exit(1)
+
+    idx = BM25Index()
+    idx.load(str(index_path))
+
+    if backend in ('hybrid', 'qdrant') and _hybrid_configured(wd):
+        try:
+            from fusion import hybrid_search
+            from qdrant_store import QdrantStore
+            store = QdrantStore(wiki_dir=wd)
+            results = hybrid_search(
+                query=query, bm25_index=idx, qdrant_store=store,
+                top_k=top_k, rerank=(not no_rerank),
+            )
+        except Exception as e:
+            print(f"  ⚠️  Hybrid search failed, falling back to BM25: {e}",
+                  file=sys.stderr)
+            results = idx.search(query, top_k=top_k)
+    else:
+        results = idx.search(query, top_k=top_k)
+
+    if not results:
+        print(f"No results found for: {query}")
+        return
+
+    # Build chunks list
+    chunks = []
+    for r in results:
+        chunk = idx.chunks[r[0]] if isinstance(r, tuple) else r
+        chunks.append(chunk)
+
+    if raw_mode:
+        # Raw mode: just print chunks
+        for i_c, chunk in enumerate(chunks):
+            print(f"\n--- Chunk {i_c+1} ({chunk.get('filepath', '?')}) ---")
+            print(chunk.get('content', ''))
+        return
+
+    # Synthesize answer using LLM
+    try:
+        from wiki_compiler import synthesize_answer, file_answer
+    except ImportError:
+        print("wiki_compiler module not found. Use --raw for raw chunks.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"🧠 Synthesizing answer for: {query}\n")
+    answer = synthesize_answer(query, chunks, wiki_dir=wd)
+
+    if answer is None:
+        print("⚠️  LLM synthesis unavailable. Showing raw chunks instead:\n")
+        for i_c, chunk in enumerate(chunks):
+            print(f"\n--- Chunk {i_c+1} ({chunk.get('filepath', '?')}) ---")
+            print(chunk.get('content', ''))
+        return
+
+    print(answer)
+
+    # File the answer as an analysis page if requested
+    if file_answer_flag:
+        source_paths = list(set(c.get('filepath', '') for c in chunks if c.get('filepath')))
+        analysis_path = file_answer(wd, query, answer, source_paths)
+        if analysis_path:
+            print(f"\n📝 Answer filed as: {analysis_path}")
+
+            # Re-index after filing
+            print("🔄 Rebuilding index...")
+            try:
+                new_idx = index_wiki(str(wd))
+                new_idx.save(str(index_path))
+                print(f"   Index rebuilt: {new_idx.N} chunks")
+            except Exception as e:
+                print(f"   ⚠️  Index rebuild failed: {e}", file=sys.stderr)
+
+
 def cmd_ingest_file(args):
     """
     Ingest a raw document or URL: copy to raw/, extract text, chunk it,
@@ -1445,6 +1569,34 @@ def cmd_ingest_file(args):
         except Exception as e:
             print(f"   ⚠️  Index rebuild failed: {e}", file=sys.stderr)
 
+    # Auto-compile ingested files into wiki pages
+    auto_compile = '--no-compile' not in args
+    if auto_compile:
+        try:
+            from wiki_compiler import compile_file, is_compiler_available
+            if is_compiler_available():
+                print("\n🧠 Auto-compiling into wiki pages...")
+                for r in results:
+                    if not r.get('readable') or not r.get('raw_copy'):
+                        continue
+                    raw_rel = r['raw_copy']
+                    try:
+                        cr = compile_file(wd, raw_rel)
+                        if cr.get('compiled') and not cr.get('skipped'):
+                            pages = cr.get('pages_created', [])
+                            print(f"   ✅ {raw_rel}: {len(pages)} pages created")
+                        elif cr.get('skipped'):
+                            print(f"   ⏭️  {raw_rel}: already compiled")
+                        else:
+                            err = cr.get('error', 'unknown')
+                            print(f"   ⚠️  {raw_rel}: compilation failed — {err}")
+                    except Exception as e:
+                        print(f"   ⚠️  {raw_rel}: compile error — {e}", file=sys.stderr)
+            else:
+                print("\n💡 Set OPENAI_API_KEY to enable auto-compilation into wiki pages.")
+        except ImportError:
+            pass  # wiki_compiler not available, skip silently
+
 
 def _ingest_url(url: str, raw_dir: Path, wiki_dir: Path) -> Dict:
     """Fetch a URL, strip HTML to plain text, download images, and save as markdown in raw/."""
@@ -1538,14 +1690,17 @@ Usage:
                                       [--freshness-weight F] [--centrality-weight F]
                                       [--backend auto|bm25|hybrid|qdrant] [--no-rerank]
                                       [--max-tokens N] [--wiki-dir PATH]
-    bm25_retriever.py ingest    FILE|URL [FILE|URL...] [--wiki-dir PATH] [--no-index]
+    bm25_retriever.py ingest    FILE|URL [FILE|URL...] [--wiki-dir PATH] [--no-index] [--no-compile]
+    bm25_retriever.py answer    QUERY [--top-k N] [--wiki-dir PATH] [--raw] [--file-answer]
+                                      [--backend auto|bm25|hybrid|qdrant] [--no-rerank]
     bm25_retriever.py stats     [--wiki-dir PATH]
 
 Commands:
     index      Build/rebuild BM25 index (+ Qdrant if hybrid configured)
     search     Search and display ranked results (human-readable)
     retrieve   Search and output full context for RAG pipeline (XML, JSON, or Marp)
-    ingest     Copy raw files or fetch URLs into wiki, extract text, auto-rebuild index
+    ingest     Copy raw files or fetch URLs into wiki, extract text, auto-compile wiki pages
+    answer     Retrieve + LLM-synthesize an answer with citations (+ optionally file it)
     stats      Show index statistics and top terms
 
 Search backend:
@@ -1586,6 +1741,7 @@ def main():
         'index': cmd_index,
         'search': cmd_search,
         'retrieve': cmd_retrieve,
+        'answer': cmd_answer,
         'ingest': cmd_ingest_file,
         'stats': cmd_stats,
     }

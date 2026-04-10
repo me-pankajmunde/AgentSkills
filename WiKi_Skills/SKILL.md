@@ -3,27 +3,29 @@ name: wiki-agent
 description: >
   An LLM-powered Wiki Agent with hybrid retrieval (BM25 + Qdrant semantic search +
   Reciprocal Rank Fusion + LLM reranking) that incrementally builds and maintains a
-  persistent, interlinked knowledge base for any project. When a user adds a document,
-  it gets ingested into a structured wiki and indexed for both keyword and semantic
-  retrieval. Queries are answered by fusing BM25 lexical matches with Qdrant vector
-  similarity via RRF, then reranking the top results using an LLM — not by re-reading
-  raw sources each time. Falls back to pure BM25 (zero dependencies) when hybrid search
-  is not configured. Use this skill whenever the user says things like
+  persistent, interlinked knowledge base from user-provided documents. When a user adds
+  a document, it gets ingested, LLM-compiled into structured wiki pages (source summaries,
+  entity pages, concept pages with cross-references), and indexed for both keyword and
+  semantic retrieval. Queries are answered by fusing BM25 lexical matches with Qdrant
+  vector similarity via RRF, then reranking the top results using an LLM — not by
+  re-reading raw sources each time. Falls back to pure BM25 (zero dependencies) when
+  hybrid search is not configured. Use this skill whenever the user says things like
   "build a wiki", "create a knowledge base", "ingest this document", "add this to the wiki",
   "update the wiki", "lint the wiki", "query the wiki", "what does the wiki say about X",
   "search wiki for Y", "process this file", "wiki status", "initialize wiki", "setup wiki",
-  "RAG pipeline", "index the wiki", "retrieve from wiki", or any reference to maintaining
-  a structured, persistent knowledge base from project files. Also trigger when the user
-  drops source files (articles, papers, transcripts, notes, code docs, PDFs, markdown)
-  and expects them to be synthesized into an evolving knowledge base — not just summarized
-  once. This skill turns any project directory into a living wiki with hybrid retrieval that
-  compounds knowledge over time. Even if the user just says "process this", "what do we
-  know about X", "organize my docs", or "find info about Y in my project", consider this skill.
+  "RAG pipeline", "index the wiki", "retrieve from wiki", "compile the wiki",
+  "answer from wiki", or any reference to maintaining a structured, persistent knowledge
+  base from documents. Also trigger when the user drops source files (articles, papers,
+  transcripts, notes, reports, PDFs, markdown) and expects them to be synthesized into an
+  evolving knowledge base — not just summarized once. This skill turns any collection of
+  documents into a living wiki with hybrid retrieval that compounds knowledge over time.
+  Even if the user just says "process this", "what do we know about X", "organize my docs",
+  or "find info about Y", consider this skill.
 ---
 
-# Wiki Agent — Hybrid RAG Pipeline (BM25 + Qdrant + RRF + LLM Reranking)
+# Wiki Agent — Document-Centric Knowledge Base with Hybrid RAG
 
-A portable, project-agnostic LLM Wiki Agent inspired by
+A portable, document-centric LLM Wiki Agent inspired by
 [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
 
 ## How It Differs from Standard RAG
@@ -33,20 +35,22 @@ answers from scratch each time. The LLM rediscovers knowledge on every question.
 
 This agent takes a fundamentally different approach:
 
-1. **Ingest** — When a document arrives, the LLM reads it, extracts key information,
-   and **compiles** it into structured wiki pages (entities, concepts, source summaries).
-   Cross-references are built, contradictions flagged, synthesis done.
+1. **Ingest** — When a document arrives, it's copied to `raw/` and indexed.
 
-2. **Index** — All wiki pages are chunked and indexed using **BM25** (Okapi BM25,
-   pure Python, zero dependencies). The index is persisted as JSON.
+2. **Compile** — The LLM reads the raw text and **compiles** it into structured wiki
+   pages: source summaries, entity pages, concept pages. Cross-references are built,
+   contradictions flagged, synthesis done. This happens automatically after ingest.
 
-3. **Retrieve** — At query time, the BM25 retriever returns ranked, relevant chunks
-   from the **compiled wiki** — not from raw sources. The LLM reads pre-synthesized,
-   cross-referenced knowledge, not scattered fragments.
+3. **Index** — All wiki pages are chunked and indexed using **BM25** (Okapi BM25,
+   pure Python, zero dependencies) and optionally **Qdrant** (semantic vectors).
+
+4. **Answer** — At query time, chunks are retrieved from the **compiled wiki**,
+   fused via RRF, reranked by LLM, and synthesized into a cited answer.
+
+5. **Enrich** — Valuable answers are filed back as analysis pages, compounding knowledge.
 
 The wiki is a **persistent, compounding artifact**. Every ingest enriches it.
-Every query can be filed back as a new analysis page. The BM25 index is rebuilt
-after each ingest so retrieval always reflects the latest state.
+Every query can be filed back. The index is rebuilt after each change.
 
 ---
 
@@ -60,15 +64,14 @@ after each ingest so retrieval always reflects the latest state.
 │         │                       │                          │
 │         ▼                       ▼                          │
 │   ┌──────────┐          ┌──────────────┐                   │
-│   │  INGEST  │          │    QUERY     │                   │
+│   │  INGEST  │          │    ANSWER    │                   │
 │   │          │          │              │                    │
-│   │ 1. Read  │          │ 1. BM25      │                   │
-│   │ 2. Wiki  │──rebuild─│    search    │                   │
-│   │    pages │  index   │ 2. Read top  │                   │
-│   │ 3. Index │──────────│    chunks    │                   │
-│   └──────────┘          │ 3. Synthesize│                   │
-│                         │ 4. File back │                   │
-│                         └──────────────┘                   │
+│   │ 1. Copy  │          │ 1. Retrieve  │                   │
+│   │ 2. Index │──rebuild─│    chunks    │                   │
+│   │ 3. LLM   │  index   │ 2. Synthesize│                   │
+│   │  compile │──────────│    answer    │                   │
+│   │ 4. Pages │          │ 3. File back │                   │
+│   └──────────┘          └──────────────┘                   │
 │                                                            │
 ├────────────────────────────────────────────────────────────┤
 │                    .wiki/ DIRECTORY                         │
@@ -76,15 +79,15 @@ after each ingest so retrieval always reflects the latest state.
 │  SCHEMA.md   index.md   log.md   overview.md               │
 │                                                            │
 │  sources/          entities/        concepts/               │
-│  ├── 2026-04-10-   ├── my-module.md ├── caching.md         │
+│  ├── 2026-04-10-   ├── openai.md    ├── caching.md         │
 │  │   paper-x.md    ├── user-api.md  ├── event-driven.md    │
 │  └── 2026-04-11-   └── auth.md      └── testing.md         │
 │      meeting.md                                             │
 │                                                            │
 │  analyses/         raw/             _bm25_index.json        │
-│  ├── comparison-   ├── paper.pdf                            │
-│  │   x-vs-y.md     └── meeting.txt                          │
-│  └── gap-report.md                                          │
+│  ├── what-is-      ├── paper.pdf                            │
+│  │   caching.md    └── meeting.txt                          │
+│  └── comparison.md                                          │
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -92,12 +95,12 @@ Three layers:
 
 **Raw sources** (`raw/`) — Immutable copies of original documents. Never modified.
 
-**The wiki** (`sources/`, `entities/`, `concepts/`, `analyses/`) — LLM-generated
+**The wiki** (`sources/`, `entities/`, `concepts/`, `analyses/`) — LLM-compiled
 structured markdown. Summaries, entity pages, concept pages, cross-references.
-The LLM owns this layer entirely. It creates pages, updates them, maintains links.
+Created automatically during compilation.
 
-**The BM25 index** (`_bm25_index.json`) — Serialized inverted index over all wiki
-pages. Rebuilt after every ingest. The retriever uses this to find relevant chunks.
+**The index** (`_bm25_index.json` + optional Qdrant) — Inverted index over all wiki
+pages. Rebuilt after every ingest.
 
 ---
 
@@ -106,70 +109,93 @@ pages. Rebuilt after every ingest. The retriever uses this to find relevant chun
 ### 1. Initialize
 
 ```bash
-python scripts/wiki.py init [--root /path/to/project]
+python wiki.py init --wiki-dir /path/to/my-wiki --name "Research Notes"
 ```
 
-Auto-detects project root, creates `.wiki/` structure, discovers tech stack.
+Creates `.wiki/` structure at the specified path. If `--wiki-dir` is omitted,
+uses the current working directory.
 
 ### 2. Ingest a Document
 
 ```bash
-# Step 1: Copy raw file and extract text
-python scripts/bm25_retriever.py ingest /path/to/document.md
-
-# Step 2: LLM agent reads the extracted text and creates wiki pages
-#          (source summary, entity pages, concept pages, cross-references)
-
-# Step 3: Rebuild the BM25 index
-python scripts/bm25_retriever.py index
+python bm25_retriever.py ingest /path/to/document.md --wiki-dir /path/to/my-wiki
 ```
 
-### 3. Query via BM25 Retrieval
+This automatically:
+1. Copies the file to `raw/`
+2. Rebuilds the BM25 index (+ Qdrant if configured)
+3. LLM-compiles the document into source, entity, and concept pages
+4. Weaves cross-references and updates log/index
+
+Use `--no-compile` to skip LLM compilation (just index).
+Use `--no-index` to skip indexing (just copy to raw/).
+
+### 3. Ask a Question
+
+```bash
+# Synthesized answer with citations
+python bm25_retriever.py answer "what is the main finding?" --wiki-dir /path/to/my-wiki
+
+# File the answer as an analysis page
+python bm25_retriever.py answer "compare X and Y" --file-answer --wiki-dir /path/to/my-wiki
+
+# Raw chunks without synthesis
+python bm25_retriever.py answer "auth flow" --raw --wiki-dir /path/to/my-wiki
+```
+
+### 4. Search & Retrieve
 
 ```bash
 # Human-readable search results
-python scripts/bm25_retriever.py search "authentication flow"
+python bm25_retriever.py search "authentication flow" --wiki-dir /path/to/my-wiki
 
-# Full RAG context for LLM consumption (XML format)
-python scripts/bm25_retriever.py retrieve "how does auth work" --top-k 5
-
-# JSON format for programmatic use
-python scripts/bm25_retriever.py retrieve "auth" --format json --top-k 5
+# Full RAG context for LLM consumption
+python bm25_retriever.py retrieve "how does auth work" --top-k 5 --wiki-dir /path/to/my-wiki
 ```
 
-### 4. Lint
+### 5. Compile & Lint
 
 ```bash
-python scripts/wiki.py lint
+# Compile any un-compiled raw files
+python wiki.py compile --all --wiki-dir /path/to/my-wiki
+
+# Force re-compile a specific file
+python wiki.py recompile raw/document.md --wiki-dir /path/to/my-wiki
+
+# Health check
+python wiki.py lint --wiki-dir /path/to/my-wiki
 ```
 
 ---
 
 ## Scripts Reference
 
-### `scripts/wiki.py` — Wiki Management
+### `wiki.py` — Wiki Management
 
 | Command | Description |
 |---------|-------------|
-| `init [--root PATH]` | Initialize wiki with project auto-detection |
-| `status` | Show wiki page counts and health |
-| `search QUERY` | Simple keyword search across pages |
-| `lint` | Check for orphans, broken links, missing frontmatter |
-| `graph` | Show link graph summary and hub pages |
+| `init --wiki-dir PATH [--name N] [--description D]` | Initialize wiki at specified path |
+| `status [--wiki-dir PATH]` | Show page counts, compile state |
+| `search QUERY [--wiki-dir PATH]` | Simple keyword search across pages |
+| `compile [--all] [FILE...] [--wiki-dir PATH]` | Compile un-compiled raw files into wiki pages |
+| `recompile FILE [--wiki-dir PATH]` | Force re-compile a specific raw file |
+| `lint [--wiki-dir PATH]` | Check for orphans, broken links, missing frontmatter |
+| `graph [--wiki-dir PATH] [--export]` | Show link graph summary and hub pages |
 
-### `scripts/bm25_retriever.py` — RAG Pipeline
+### `bm25_retriever.py` — RAG Pipeline
 
 | Command | Description |
 |---------|-------------|
-| `index [--chunk-size N] [--overlap N] [--bm25-only]` | Build/rebuild BM25 index (+ Qdrant if hybrid configured) |
-| `search QUERY [--top-k N] [--type TYPE] [--backend auto\|bm25\|hybrid\|qdrant] [--no-rerank]` | Search and display ranked results |
-| `retrieve QUERY [--top-k N] [--format xml\|json\|marp] [--brief] [--backend auto\|bm25\|hybrid\|qdrant] [--no-rerank]` | Retrieve context for LLM |
-| `ingest FILE\|URL [FILE\|URL...] [--no-index]` | Ingest files or URLs, auto-rebuild index (+ Qdrant sync) |
-| `stats` | Show index statistics, top terms, chunk distribution |
+| `index [--wiki-dir PATH] [--bm25-only]` | Build/rebuild BM25 index (+ Qdrant if configured) |
+| `search QUERY [--top-k N] [--backend B] [--no-rerank]` | Search and display ranked results |
+| `retrieve QUERY [--top-k N] [--format xml\|json\|marp]` | Retrieve context for LLM |
+| `answer QUERY [--top-k N] [--raw] [--file-answer]` | Retrieve + LLM-synthesize answer with citations |
+| `ingest FILE\|URL [...] [--no-index] [--no-compile]` | Ingest files/URLs, auto-index + auto-compile |
+| `stats [--wiki-dir PATH]` | Show index statistics |
 
 **BM25 Parameters** (tunable in code):
-- `k1=1.5` — Term frequency saturation. Higher → raw TF counts more.
-- `b=0.75` — Length normalization. 0 = none, 1 = full normalization.
+- `k1=1.5` — Term frequency saturation
+- `b=0.75` — Length normalization
 
 ---
 
@@ -181,13 +207,11 @@ python scripts/wiki.py lint
 
 **Steps**:
 
-1. Run `python scripts/wiki.py init` to create directory structure.
-2. Read the generated `_discovery.json` for project metadata.
-3. Read `references/schema-template.md` to understand the template.
-4. Generate `SCHEMA.md` tailored to the discovered project.
-5. Generate `overview.md` from README + directory scan.
-6. Build initial BM25 index: `python scripts/bm25_retriever.py index`
-7. Report what was discovered and created.
+1. Run `python wiki.py init --wiki-dir /path/to/wiki --name "My Wiki"`
+2. This creates `.wiki/` with `sources/`, `entities/`, `concepts/`, `analyses/`, `raw/`
+3. Generates minimal `_discovery.json` (name, description, dates)
+4. Creates `log.md` and `index.md`
+5. Build initial BM25 index: `python bm25_retriever.py index --wiki-dir /path/to/wiki`
 
 ---
 
@@ -195,113 +219,135 @@ python scripts/wiki.py lint
 
 **When**: User adds a source and says "ingest", "process", "add this to the wiki".
 
-**The ingest pipeline has 4 stages:**
-
-#### Stage 1: Raw Ingestion
 ```bash
-python scripts/bm25_retriever.py ingest /path/to/document.md
+python bm25_retriever.py ingest /path/to/document.md --wiki-dir /path/to/wiki
 ```
-This copies the file to `raw/`, extracts text, and outputs a JSON summary with
-content preview. For PDFs/DOCX, use the appropriate reading skill first to
-extract text into a `.md` file, then ingest that.
 
-#### Stage 2: Wiki Page Creation (LLM does this)
+**What happens automatically:**
 
-The LLM agent reads the extracted text and creates/updates wiki pages:
+1. **Raw copy** — File copied to `raw/`, text extracted
+2. **BM25 index rebuilt** — Chunks created, inverted index updated
+3. **Qdrant synced** — If hybrid configured, vectors upserted
+4. **LLM compilation** — If OPENAI_API_KEY set:
+   - Source page created in `sources/`
+   - Entity pages created/merged in `entities/`
+   - Concept pages created/merged in `concepts/`
+   - Cross-references woven between all pages
+   - `log.md` and `index.md` updated
 
-1. **Source summary page** in `sources/YYYY-MM-DD-<slug>.md`:
-   - YAML frontmatter with title, source_type, date_ingested, tags, key_entities
-   - Summary, key claims, notable data points, questions raised
+Use `--no-compile` to skip LLM compilation (just index).
+Use `--no-index` to skip indexing (just copy to raw/).
 
-2. **Entity pages** in `entities/<slug>.md`:
-   - For each key entity (module, API, person, tool, etc.)
-   - Check existing pages first — merge, don't overwrite
-   - Cite the source page
-
-3. **Concept pages** in `concepts/<slug>.md`:
-   - For abstract patterns, principles, themes
-   - Cross-reference with entity pages
-
-4. **Update `index.md`** — add new pages with one-line summaries
-
-5. **Update `overview.md`** — if the source materially changes the big picture
-
-6. **Append to `log.md`**:
-   ```
-   ## [YYYY-MM-DD] ingest | <Source Title>
-   - Source: raw/<filename>
-   - Pages created: <list>
-   - Pages updated: <list>
-   - Key takeaway: <one sentence>
-   ```
-
-#### Stage 3: Rebuild BM25 Index
-The BM25 index auto-rebuilds after every ingest by default. If you used
-`--no-index` during batch ingestion, rebuild manually:
+**Verification:**
 ```bash
-python scripts/bm25_retriever.py index
+python bm25_retriever.py stats --wiki-dir /path/to/wiki
+python bm25_retriever.py search "<key term>" --wiki-dir /path/to/wiki
 ```
-This re-chunks all wiki pages and rebuilds the inverted index.
-
-#### Stage 4: Verification
-```bash
-python scripts/bm25_retriever.py stats
-python scripts/bm25_retriever.py search "<key term from new source>"
-```
-Verify the new content is findable. Report chunk counts and confirm retrieval.
 
 ---
 
-### QUERY — Answer Questions Using BM25 Retrieval
+### COMPILE — Process Raw Files into Wiki Pages
+
+**When**: User says "compile the wiki" or raw files haven't been compiled yet.
+
+```bash
+# Compile all un-compiled raw files
+python wiki.py compile --all --wiki-dir /path/to/wiki
+
+# Compile specific files
+python wiki.py compile raw/paper.md raw/notes.txt --wiki-dir /path/to/wiki
+
+# Force re-compile (overwrites existing compiled pages)
+python wiki.py recompile raw/paper.md --wiki-dir /path/to/wiki
+```
+
+The compiler reads each raw file and uses the LLM to:
+1. Generate a **source page** with summary, key claims, entities, concepts
+2. Create/merge **entity pages** — new entities get new pages, existing ones get updated
+   with new info and contradiction flags (⚠️)
+3. Create/merge **concept pages** — same pattern
+4. **Weave cross-references** — ensure bidirectional links
+5. **Update meta** — log.md, index.md, _discovery.json
+
+Compilation state is tracked in `_compile_state.json` to avoid re-processing.
+
+**Requires:** `OPENAI_API_KEY` environment variable (uses gpt-4o-mini by default,
+configurable via `WIKI_COMPILE_MODEL`).
+
+---
+
+### ANSWER — Ask Questions with Synthesized Answers
 
 **When**: User asks a question about wiki contents.
 
-**The query pipeline:**
-
-#### Step 1: Retrieve Relevant Chunks
 ```bash
-python scripts/bm25_retriever.py retrieve "user's question" --top-k 5 --format xml
+python bm25_retriever.py answer "what do we know about caching?" --wiki-dir /path/to/wiki
 ```
 
-This returns structured XML context:
-```xml
-<wiki_context query="how does authentication work">
-<chunk source="entities/auth-module.md" section="Overview" score="8.42" type="entity">
-[Auth Module] [Overview]
+**Pipeline:**
+1. Retrieve relevant chunks (BM25 or hybrid)
+2. LLM synthesizes answer with inline `[source](path)` citations
+3. Optionally file the answer as an analysis page (`--file-answer`)
 
-The authentication module handles JWT-based auth flow...
-</chunk>
-<chunk source="concepts/token-refresh.md" section="Key Aspects" score="6.15" type="concept">
-...
-</chunk>
-</wiki_context>
+**Flags:**
+- `--raw` — Skip synthesis, show raw chunks
+- `--file-answer` — Save answer as `analyses/` page and re-index
+- `--top-k N` — Number of chunks to retrieve (default 5)
+- `--backend auto|bm25|hybrid|qdrant` — Search backend
+- `--no-rerank` — Skip LLM reranking
+
+**Filing answers back** is how queries compound — your explorations become part
+of the knowledge base.
+
+---
+
+### QUERY — Search and Retrieve Chunks
+
+**When**: User wants raw chunks or search results (not synthesized answers).
+
+```bash
+# Human-readable ranked results
+python bm25_retriever.py search "authentication flow" --wiki-dir /path/to/wiki
+
+# Full RAG context for LLM consumption (XML format)
+python bm25_retriever.py retrieve "how does auth work" --top-k 5 --wiki-dir /path/to/wiki
+
+# JSON format for programmatic use
+python bm25_retriever.py retrieve "auth" --format json --top-k 5
+
+# Brief mode — title + 2 sentences per chunk
+python bm25_retriever.py retrieve "auth" --brief
 ```
 
-#### Step 2: LLM Synthesizes Answer
-
-The LLM reads the retrieved chunks and synthesizes an answer with citations
-back to specific wiki pages.
-
-#### Step 3: File Valuable Answers Back
-
-If the answer is a valuable synthesis (comparison, analysis, connection), offer
-to save it as a new page in `analyses/`. Then rebuild the index. This is how
-**queries compound** — your explorations become part of the knowledge base.
-
-**Query flags:**
+**Search flags:**
 - `--type entity|concept|source|analysis` — filter by page type
 - `--top-k N` — number of chunks to retrieve (default 5)
-- `--max-tokens N` — approximate token budget for context (default 4000)
-- `--brief` — return title + section + 2 sentences per chunk (~300 tokens)
+- `--brief` — return title + section + 2-sentence preview (~300 tokens)
 - `--freshness-weight F` — boost recently-updated pages (0.0-1.0)
 - `--centrality-weight F` — boost hub pages (requires `graph --export` first)
-- `--format marp` — output as Marp slide deck
-- `--backend auto|bm25|hybrid|qdrant` — search backend (`auto` uses hybrid if configured)
-- `--no-rerank` — skip LLM reranking, use RRF fusion scores directly
+- `--format xml|json|marp` — output format
+- `--backend auto|bm25|hybrid|qdrant` — search backend
+- `--no-rerank` — skip LLM reranking
 
-#### Hybrid Search (Qdrant + RRF + LLM Reranking)
+---
 
-When hybrid search is configured, the retrieval pipeline is:
+### LINT — Health Check the Wiki
+
+**When**: User says "lint the wiki" or periodically after many ingests.
+
+```bash
+python wiki.py lint --wiki-dir /path/to/wiki
+python bm25_retriever.py stats --wiki-dir /path/to/wiki
+```
+
+**Checks**: orphan pages, broken links, missing frontmatter, isolated pages,
+asymmetric links, stale content, missing confidence fields, index health.
+
+---
+
+## Hybrid Search (Qdrant + RRF + LLM Reranking)
+
+When configured, retrieval uses a multi-stage pipeline:
 
 ```
 Query → BM25 (top 50) + Qdrant semantic (top 50)
@@ -314,69 +360,43 @@ Query → BM25 (top 50) + Qdrant semantic (top 50)
 ```bash
 pip install 'farmerp-wiki[hybrid]'           # Install qdrant-client + openai
 docker run -p 6333:6333 qdrant/qdrant        # Start Qdrant
-export OPENAI_API_KEY=sk-...                 # For embeddings + reranking
-python scripts/bm25_retriever.py index       # Build BM25 + Qdrant indexes
-python scripts/bm25_retriever.py search "auth" --backend hybrid
+export OPENAI_API_KEY=sk-...                 # For embeddings + reranking + compilation
+python bm25_retriever.py index --wiki-dir /path/to/wiki
 ```
 
----
-
-### LINT — Health Check the Wiki
-
-**When**: User says "lint the wiki" or periodically after many ingests.
-
-```bash
-python scripts/wiki.py lint
-python scripts/bm25_retriever.py stats
-```
-
-**Checks**:
-1. Orphan pages (no inbound links)
-2. Broken links
-3. Missing YAML frontmatter
-4. Isolated pages (no outbound links)
-5. Asymmetric links (A→B exists but B→A doesn't)
-6. Stale content (pages not updated in 30+ days)
-7. Missing `confidence` field in frontmatter
-8. Index health (chunk distribution, term coverage)
+Falls back to pure BM25 (zero dependencies) if not configured.
 
 ---
 
 ## Chunking Strategy
 
-The BM25 retriever chunks wiki pages using a hierarchical strategy:
+Pages are chunked hierarchically:
+1. Split on `##` headers
+2. Split long sections on paragraphs
+3. Split long paragraphs on sentences
+4. Add configurable overlap (default 100 words)
 
-1. **Split on `##` headers** — each section becomes a potential chunk
-2. **Split long sections on paragraph breaks** — if a section exceeds `max_chunk_size`
-3. **Split long paragraphs on sentences** — last resort for very long text blocks
-4. **Add overlap** — configurable overlap between consecutive chunks (default 100 words)
-
-Every chunk is prefixed with `[Page Title] [Section Header]` for context when
-the chunk is retrieved independently.
+Each chunk is prefixed with `[Page Title] [Section Header]` for context.
 
 **Default parameters:**
 - `max_chunk_size = 800` words per chunk
 - `overlap = 100` words between consecutive chunks
 
-Tuning: increase chunk size for conceptual/narrative documents, decrease for
-dense technical reference where precision matters.
-
 ---
 
 ## BM25 Scoring
 
-The retriever uses Okapi BM25, the standard probabilistic ranking function:
+Okapi BM25 probabilistic ranking:
 
 ```
 score(q, d) = Σ IDF(qi) × (tf × (k1 + 1)) / (tf + k1 × (1 - b + b × |d|/avgdl))
 ```
 
-- **IDF** — Terms that appear in fewer documents are weighted higher (more discriminative)
-- **TF saturation** — Controlled by `k1`. A term appearing 10x isn't 10x as important.
-- **Length normalization** — Controlled by `b`. Longer documents don't unfairly dominate.
+- **IDF** — Terms in fewer documents weighted higher
+- **TF saturation** — Controlled by `k1`. Diminishing returns for repeat terms.
+- **Length normalization** — Controlled by `b`. Longer documents don't dominate.
 
-The index is a pure-Python inverted index serialized as JSON. No external
-dependencies (no NumPy, no NLTK, no rank_bm25). Works anywhere Python runs.
+Pure-Python inverted index serialized as JSON. No external dependencies.
 
 ---
 
@@ -391,27 +411,13 @@ type: source | entity | concept | analysis | overview
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
 tags: [tag1, tag2]
-sources: [source-slug-1, source-slug-2]
-related: [page-slug-1, page-slug-2]
+sources: [source-slug-1]
+related: [page-slug-1]
+confidence: high | medium | speculative
 ---
 ```
 
-See `references/page-templates.md` for full templates.
-
----
-
-## Project Auto-Detection
-
-The agent adapts based on what it discovers at init:
-
-| Signal | Adaptation |
-|--------|-----------|
-| `package.json` | Entity pages for npm packages, API modules |
-| `pyproject.toml` | Entity pages for Python packages, classes |
-| `Cargo.toml` | Entity pages for Rust crates |
-| `go.mod` | Entity pages for Go packages |
-| `docs/` directory | Auto-ingest existing documentation |
-| No code signals | General knowledge base mode |
+See `page-templates.md` for full templates.
 
 ---
 
@@ -419,175 +425,72 @@ The agent adapts based on what it discovers at init:
 
 ### As a Standalone CLI
 ```bash
-# One-shot RAG query
-python scripts/bm25_retriever.py retrieve "my question" --top-k 5
+python bm25_retriever.py answer "my question" --wiki-dir /path/to/wiki
 ```
 
 ### In an LLM Agent Loop
 ```python
-# 1. User asks a question
-query = user_input
-
-# 2. Retrieve context
 import subprocess
 result = subprocess.run(
-    ['python', 'scripts/bm25_retriever.py', 'retrieve', query,
-     '--top-k', '5', '--format', 'xml'],
+    ['python', 'bm25_retriever.py', 'retrieve', query,
+     '--top-k', '5', '--format', 'xml', '--wiki-dir', wiki_path],
     capture_output=True, text=True
 )
 context = result.stdout
-
-# 3. Inject into LLM prompt
-prompt = f"""Answer the following question using the wiki context below.
-Cite specific pages in your answer.
-
-{context}
-
-Question: {query}
-"""
 ```
 
 ### In Claude Code / Codex / Cursor
 The SKILL.md tells the agent how to use the scripts. Just say:
-- "Initialize a wiki for this project"
-- "Ingest docs/architecture.md"
+- "Initialize a wiki at /path/to/wiki"
+- "Ingest docs/architecture.md into the wiki"
 - "What does the wiki say about caching?"
+- "Compile the wiki"
 - "Lint the wiki"
-
----
-
-## Tips
-
-1. **Ingest one at a time** for important sources. Stay involved — check the
-   summaries, guide the emphasis. Batch-ingest for less critical sources.
-
-2. **Index auto-rebuilds after ingest.** The `ingest` command now auto-rebuilds
-   the BM25 index by default. Use `--no-index` to skip if batch-ingesting
-   many files (then run `index` once at the end).
-
-3. **File valuable query answers back.** The analyses/ directory is where your
-   explorations compound into permanent knowledge.
-
-4. **Lint periodically.** Orphan pages, missing cross-references, stale content,
-   and asymmetric links accumulate. Run `lint` after every 5-10 ingests.
-
-5. **The wiki is just markdown files.** You can browse it in Obsidian, VS Code,
-   or any editor. `git init` the `.wiki/` directory for version history.
-
-6. **Use `--brief` for token-efficient retrieval.** When exploring broadly, use
-   `retrieve --brief` to get title + section + 2-sentence preview per chunk
-   (~300 tokens total). Request full pages only for relevant results.
-
-7. **Boost recent and authoritative content.** Use `--freshness-weight 0.1` to
-   surface recently-updated pages. Use `--centrality-weight 0.1` (after running
-   `graph --export`) to boost well-connected hub pages.
-
-8. **Ingest URLs directly.** Pass a URL to `ingest` to fetch web articles, strip
-   HTML, and save as markdown in `raw/`. Useful for quickly capturing web sources.
-
-9. **Generate slide decks.** Use `retrieve --format marp` to create a Marp-compatible
-   presentation from wiki knowledge. View with Obsidian's Marp plugin or any
-   Marp renderer.
-
-10. **Upgrade to hybrid search with qmd.** Install [qmd](https://github.com/tobi/qmd)
-    (`npm install -g @tobilu/qmd`) for BM25 + vector + LLM re-ranking search.
-    Once installed, all `search` and `retrieve` commands automatically use it
-    (`--backend auto`). Force BM25 with `--backend bm25`. Use `--qmd-mode vsearch`
-    for pure semantic search, or `--qmd-mode query` (default) for full hybrid.
-
----
-
-## qmd Integration (Optional)
-
-The retriever optionally delegates to [qmd](https://github.com/tobi/qmd) —
-a local hybrid search engine combining BM25 + vector embeddings + LLM re-ranking.
-
-**When to use:** When the wiki exceeds ~100 pages, or when keyword BM25 misses
-results where the user's query uses different words than the wiki content.
-
-**Setup:**
-```bash
-# 1. Install qmd (requires Node.js >= 22)
-npm install -g @tobilu/qmd
-
-# 2. Create a collection for the wiki
-cd .wiki && qmd collection add . --name wiki
-
-# 3. Add context to improve search quality
-qmd context add qmd://wiki "Project wiki — entities, concepts, sources, analyses"
-
-# 4. Generate vector embeddings (~2GB of models downloaded on first run)
-qmd embed
-```
-
-**How it works:**
-- `--backend auto` (default): uses qmd if installed, falls back to BM25
-- `--backend bm25`: forces pure-Python BM25 (zero dependencies)
-- `--backend qmd`: forces qmd (errors if not installed)
-- `--qmd-mode query`: hybrid BM25 + vector + re-ranking (best quality, default)
-- `--qmd-mode search`: BM25 only via qmd
-- `--qmd-mode vsearch`: vector semantic search only
-
-**Auto-sync:** After every `ingest`, if qmd is installed, the retriever
-automatically runs `qmd update && qmd embed` to keep the hybrid index current.
-
-**Zero-dependency contract preserved:** qmd is entirely optional. If not
-installed, everything works exactly as before with pure-Python BM25.
 
 ---
 
 ## Image Handling
 
-Images are **automatically handled** during ingestion. The `ingest` command:
+Images are **automatically handled** during ingestion:
 
-1. **Local files**: Detects `![alt](path)` and `<img src="...">` references in
-   ingested documents, copies referenced images to `raw/assets/`, and rewrites
-   paths in the raw copy so they point to `assets/filename.png`.
-2. **URLs**: Extracts `<img>` tags from fetched HTML, downloads image files to
-   `raw/assets/`, and appends markdown image references to the saved document.
+1. **Local files**: Detects `![alt](path)` and `<img src="...">` references,
+   copies images to `raw/assets/`, rewrites paths in the raw copy.
+2. **URLs**: Extracts `<img>` tags from fetched HTML, downloads to `raw/assets/`.
 3. Supported formats: `.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.webp`, `.bmp`, `.ico`, `.tiff`
-
-**Wiki page references**: Use relative paths — `![Description](../raw/assets/image.png)`
-
-**LLM note**: LLMs can't read markdown with inline images in one pass — read the text
-first, then view referenced images separately for additional context.
-
-**Obsidian integration** (optional):
-- Settings → Files and links → set "Attachment folder path" to `raw/assets/`
-- Bind "Download attachments" to a hotkey (e.g. Ctrl+Shift+D)
-- **Obsidian Web Clipper** is useful for converting web articles to markdown
 
 ---
 
 ## Git Integration
 
-The wiki is just a directory of markdown files — it works naturally with git.
+The wiki is just markdown files — it works naturally with git.
 
-**Recommended setup:**
 ```bash
 cd .wiki && git init
-echo "_bm25_index.json" >> .gitignore   # large, auto-rebuilt
-echo "_discovery.json" >> .gitignore     # project-specific
-echo "_centrality.json" >> .gitignore    # auto-rebuilt
-echo "raw/" >> .gitignore                # optional: skip raw copies
+echo "_bm25_index.json" >> .gitignore
+echo "_discovery.json" >> .gitignore
+echo "_centrality.json" >> .gitignore
+echo "_compile_state.json" >> .gitignore
+echo "raw/" >> .gitignore
 git add -A && git commit -m "Wiki initialized"
 ```
 
-**Benefits:**
-- Full version history of every wiki page
-- Branch for experimental synthesis, merge when confident
-- Diff wiki changes after each ingest to review LLM edits
-- Team collaboration: each person forks, PRs back to shared wiki
-- Revert bad LLM edits with `git checkout`
+---
 
-**Obsidian's graph view** is the best way to visualize the wiki's shape — what's
-connected, which pages are hubs, which are orphans.
+## Tips
+
+1. **Ingest one at a time** for important sources. Check the compiled pages.
+2. **Index auto-rebuilds and compilation auto-runs after ingest.**
+3. **File valuable answers back** with `--file-answer`. Analyses compound knowledge.
+4. **Lint periodically** after 5-10 ingests.
+5. **The wiki is just markdown.** Browse in Obsidian, VS Code, or any editor.
+6. **Use `--brief` retrieval** for token-efficient broad exploration.
+7. **Set OPENAI_API_KEY** to enable compilation, answer synthesis, and hybrid search.
+8. **Ingest URLs directly.** Pass a URL to `ingest` to fetch web articles.
+9. **Use `--format marp`** to generate slide decks from wiki knowledge.
 
 ---
 
 ## Reference Files
 
-Read these before initializing a new wiki:
-
-- `references/schema-template.md` — Default SCHEMA.md template
-- `references/page-templates.md` — Templates for each page type (source, entity, concept, analysis)
+- `page-templates.md` — Templates for each page type
+- `schema-template.md` — Default SCHEMA.md template

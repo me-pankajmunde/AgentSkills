@@ -97,12 +97,15 @@ def _load_config(wiki_dir: Optional[Path] = None) -> Dict[str, Any]:
             except (json.JSONDecodeError, OSError):
                 pass
 
-        # Use project name from _discovery.json as default collection name
+        # Use wiki name from _discovery.json as default collection name
         discovery_path = wiki_dir / '_discovery.json'
         if discovery_path.exists() and config['collection_name'] == 'wiki':
             try:
                 discovery = json.loads(discovery_path.read_text(encoding='utf-8'))
-                name = discovery.get('project_name', '').lower().replace(' ', '-')
+                name = discovery.get('name', '').lower().replace(' ', '-')
+                if not name:
+                    # Backwards compat with old project-centric format
+                    name = discovery.get('project_name', '').lower().replace(' ', '-')
                 if name:
                     config['collection_name'] = f"wiki-{name}"
             except (json.JSONDecodeError, OSError):

@@ -16,13 +16,12 @@ created: {{DATE}}
 updated: {{DATE}}
 ---
 
-# {{PROJECT_NAME}} Wiki Schema
+# {{WIKI_NAME}} Wiki Schema
 
-## Project Context
+## Wiki Context
 
-- **Project**: {{PROJECT_NAME}}
-- **Type**: {{PROJECT_TYPE}} (e.g., web app, library, research, personal notes)
-- **Tech Stack**: {{TECH_STACK}}
+- **Name**: {{WIKI_NAME}}
+- **Description**: {{WIKI_DESCRIPTION}}
 - **Initialized**: {{DATE}}
 
 ## Directory Structure
@@ -157,16 +156,15 @@ grep "ingest" log.md | wc -l            # count ingestions
 
 When generating SCHEMA.md, the agent should:
 
-1. **Fill in project metadata** from auto-detection (name, type, tech stack).
+1. **Fill in wiki metadata** from the `--name` and `--description` provided at init.
 
 2. **Add domain-specific page types** if appropriate:
-   - For code projects: `architecture/` for system design pages
    - For research: `papers/` instead of generic `sources/`
    - For books: `characters/`, `plot-threads/`, `themes/`
    - For business: `decisions/`, `meetings/`, `stakeholders/`
 
-3. **Customize conventions** based on the domain:
-   - Code projects: entity pages for modules, classes, APIs
+3. **Customize conventions** based on the document domain:
+   - Technical docs: entity pages for components, APIs, tools
    - Research: entity pages for authors, papers, datasets
    - Personal notes: entity pages for people, goals, habits
 
